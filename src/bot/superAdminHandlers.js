@@ -20,12 +20,7 @@ const logger = require('../utils/logger');
 const sessions = {};
 
 const requireSuperAdmin = async (ctx, next) => {
-  const superAdminIds = String(process.env.SUPER_ADMIN_IDS || '')
-    .split(',')
-    .map(id => parseInt(id.trim()))
-    .filter(Boolean);
-
-  if (!superAdminIds.includes(ctx.from.id)) {
+  if (ctx.from.id !== parseInt(process.env.SUPER_ADMIN_ID)) {
     return ctx.reply('⛔ Super Admin access required.');
   }
   return next();
