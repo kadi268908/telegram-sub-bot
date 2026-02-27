@@ -1,0 +1,22 @@
+{
+  "name": "telegram-subscription-bot",
+  "version": "2.0.0",
+  "description": "Production-ready Telegram Subscription Management Bot with advanced features",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js"
+  },
+  "dependencies": {
+    "telegraf": "^4.16.3",
+    "mongoose": "^8.3.4",
+    "dotenv": "^16.4.5",
+    "node-cron": "^3.0.3",
+    "express": "^4.19.2",
+    "winston": "^3.13.0",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
+}
