@@ -81,18 +81,27 @@ const start = async () => {
     await connectDB();
 
     // Seed super admin document
+    // Seed super admin documents
     const User = require('./models/User');
-    await User.findOneAndUpdate(
-      { telegramId: parseInt(process.env.SUPER_ADMIN_ID) },
-      { $setOnInsert: {
-          telegramId: parseInt(process.env.SUPER_ADMIN_ID),
-          name: 'Super Admin',
-          role: 'superadmin',
-          status: 'active',
-        }
-      },
-      { upsert: true }
-    );
+    const superAdminIds = String(process.env.SUPER_ADMIN_IDS || '')
+      .split(',')
+      .map(id => parseInt(id.trim()))
+      .filter(Boolean);
+
+    for (const id of superAdminIds) {
+      await User.findOneAndUpdate(
+        { telegramId: id },
+        {
+          $setOnInsert: {
+            telegramId: id,
+            name: 'Super Admin',
+            role: 'superadmin',
+            status: 'active',
+          },
+        },
+        { upsert: true }
+      );
+    }
 
     initCronJobs(bot);
 
