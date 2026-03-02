@@ -536,6 +536,48 @@ const registerUserHandlers = (bot) => {
     await showStatus(ctx);
   });
 
+  // ── View Plans + Offers ───────────────────────────────────────────────────
+  bot.action('view_plans_offers', async (ctx) => {
+    await ctx.answerCbQuery();
+    try {
+      await User.findOneAndUpdate({ telegramId: ctx.from.id }, { lastInteraction: new Date() });
+
+      const plans = await getActivePlans();
+      const offers = await getActiveOffers();
+
+      let message = `📋 *Plans ki Jankari*\n\n`;
+
+      if (!plans.length) {
+        message += `Plan check karne k liye supoort se contact karen /support type karen\n\n`;
+      } else {
+        plans.forEach((plan, i) => {
+          message += `${i + 1}. *${escapeMarkdown(plan.name)}* — ${plan.durationDays} days`;
+          if (plan.price) message += ` — ₹${plan.price}`;
+          message += `\n`;
+        });
+        message += `\n`;
+      }
+
+      message += `🎁 *Current Offers*\n\n`;
+      if (!offers.length) {
+        message += `Koi active offer nahi hai abhi.`;
+      } else {
+        offers.forEach((offer, i) => {
+          const days = Math.max(0, Math.ceil((new Date(offer.validTill) - new Date()) / 86400000));
+          message += `${i + 1}. *${escapeMarkdown(offer.title)}*\n`;
+          message += `${escapeMarkdown(offer.description)}\n`;
+          if (offer.discountPercent > 0) message += `💰 *${offer.discountPercent}% OFF*\n`;
+          message += `⏰ Expires in *${days} day${days !== 1 ? 's' : ''}*\n\n`;
+        });
+      }
+
+      await ctx.reply(message, { parse_mode: 'Markdown' });
+    } catch (err) {
+      logger.error(`view_plans_offers error: ${err.message}`);
+      await ctx.reply('❌ Unable to fetch plans right now. Please try again.');
+    }
+  });
+
   // ── View Offers ────────────────────────────────────────────────────────────
   bot.action('view_offers', async (ctx) => {
     await ctx.answerCbQuery();
@@ -717,8 +759,17 @@ const registerUserHandlers = (bot) => {
       const activeTicket = await getActiveTicket(userId);
 
       if (!isAwaiting && !activeTicket) {
-        // Not in any support flow — pass to next handler
-        return next();
+        return ctx.reply(
+          `⚠️ *AK IMAX Premium*\n\n` +
+          `Premium access lene ke liye pehle Plan Buy karen.\n` +
+          `Niche diye gaye button pe click karein:`,
+          {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+              [withStyle(Markup.button.callback('📋 View Plans & Offers', 'view_plans_offers'), 'primary')],
+            ]),
+          }
+        );
       }
 
       if (isAwaiting && !activeTicket) {
