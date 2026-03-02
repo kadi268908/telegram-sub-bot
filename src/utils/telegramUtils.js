@@ -12,7 +12,11 @@ const logger = require('../utils/logger');
  */
 const safeSend = async (bot, telegramId, text, extra = {}) => {
   try {
-    await bot.telegram.sendMessage(telegramId, text, extra);
+    const safeExtra = {
+      ...extra,
+      protect_content: typeof extra?.protect_content === 'undefined' ? true : extra.protect_content,
+    };
+    await bot.telegram.sendMessage(telegramId, text, safeExtra);
     return true;
   } catch (err) {
     // 403 = user blocked the bot

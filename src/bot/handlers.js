@@ -194,7 +194,11 @@ const registerUserHandlers = (bot) => {
     const originalReply = ctx.reply.bind(ctx);
 
     ctx.reply = async (text, extra) => {
-      const sent = await originalReply(text, extra);
+      const safeExtra = {
+        ...(extra || {}),
+        protect_content: typeof extra?.protect_content === 'undefined' ? true : extra.protect_content,
+      };
+      const sent = await originalReply(text, safeExtra);
 
       if (incomingUserMessageId && !userMessageDeleted) {
         userMessageDeleted = true;

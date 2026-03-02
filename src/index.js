@@ -42,6 +42,39 @@ if (!superAdminIds.length) {
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
+const protectBotMessages = String(process.env.PROTECT_BOT_MESSAGES || 'true').toLowerCase() !== 'false';
+if (protectBotMessages) {
+  const protectedMethods = new Set([
+    'sendMessage',
+    'sendPhoto',
+    'sendVideo',
+    'sendAudio',
+    'sendDocument',
+    'sendVoice',
+    'sendAnimation',
+    'sendVideoNote',
+    'sendSticker',
+    'sendMediaGroup',
+  ]);
+
+  const originalCallApi = bot.telegram.callApi.bind(bot.telegram);
+  bot.telegram.callApi = (method, payload, ...rest) => {
+    const safePayload = payload && typeof payload === 'object' ? { ...payload } : payload;
+
+    if (
+      safePayload &&
+      protectedMethods.has(method) &&
+      typeof safePayload.protect_content === 'undefined'
+    ) {
+      safePayload.protect_content = true;
+    }
+
+    return originalCallApi(method, safePayload, ...rest);
+  };
+
+  logger.info('Bot content protection enabled (anti-forward on supported clients).');
+}
+
 // Global error handler — prevents crashes on unexpected Telegram errors
 bot.catch((err, ctx) => {
   const message = err?.response?.description || err?.description || err?.message || '';
