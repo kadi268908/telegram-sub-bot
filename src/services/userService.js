@@ -6,6 +6,11 @@ const Request = require('../models/Request');
 const Subscription = require('../models/Subscription');
 const logger = require('../utils/logger');
 
+const SUPER_ADMIN_IDS = String(process.env.SUPER_ADMIN_IDS || process.env.SUPER_ADMIN_ID || '')
+  .split(',')
+  .map(id => parseInt(id.trim(), 10))
+  .filter(Boolean);
+
 /**
  * Find or create a user from Telegram context
  */
@@ -18,7 +23,7 @@ const findOrCreateUser = async (telegramUser) => {
         telegramId: telegramUser.id,
         name: `${telegramUser.first_name}${telegramUser.last_name ? ' ' + telegramUser.last_name : ''}`,
         username: telegramUser.username || null,
-        role: telegramUser.id === parseInt(process.env.SUPER_ADMIN_ID) ? 'superadmin' : 'user',
+        role: SUPER_ADMIN_IDS.includes(telegramUser.id) ? 'superadmin' : 'user',
       });
       logger.info(`New user registered: ${user.telegramId} (@${user.username})`);
     } else {

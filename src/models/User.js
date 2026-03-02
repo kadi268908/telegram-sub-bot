@@ -57,6 +57,33 @@ const userSchema = new mongoose.Schema({
     type: Boolean,
     default: false,
   },
+  // Seller referral program
+  isSeller: {
+    type: Boolean,
+    default: false,
+    index: true,
+  },
+  sellerCode: {
+    type: String,
+    unique: true,
+    sparse: true,
+    default: undefined,
+  },
+  sellerReferredBy: {
+    type: Number, // telegramId of seller referrer
+    default: null,
+    index: true,
+  },
+  sellerCommissionApplied: {
+    type: Boolean,
+    default: false,
+  },
+  sellerStats: {
+    totalReferrals: { type: Number, default: 0 },
+    qualifiedReferrals: { type: Number, default: 0 },
+    lifetimeEarnings: { type: Number, default: 0 },
+    availableBalance: { type: Number, default: 0 },
+  },
   // Activity tracking
   lastInteraction: {
     type: Date,

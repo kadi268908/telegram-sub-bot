@@ -11,6 +11,11 @@ const {
 } = require('../services/adminService');
 const { getSalesReport, getTodayExpiryList } = require('../services/subscriptionService');
 const { getGrowthStats, getPlanPerformance } = require('../services/analyticsService');
+const {
+  getPendingSellerWithdrawalRequests,
+  approveSellerWithdrawal,
+  rejectSellerWithdrawal,
+} = require('../services/referralService');
 const { logToChannel } = require('../services/cronService');
 const { safeSend } = require('../utils/telegramUtils');
 const { formatDate, startOfToday, endOfToday, startOfWeek, startOfMonth } = require('../utils/dateUtils');
@@ -19,14 +24,27 @@ const logger = require('../utils/logger');
 // In-memory session for broadcast flow
 const sessions = {};
 
+const getSuperAdminIds = () => {
+  return String(process.env.SUPER_ADMIN_IDS || process.env.SUPER_ADMIN_ID || '')
+    .split(',')
+    .map(id => parseInt(id.trim(), 10))
+    .filter(Boolean);
+};
+
 const requireSuperAdmin = async (ctx, next) => {
-  if (ctx.from.id !== parseInt(process.env.SUPER_ADMIN_ID)) {
+  const superAdminIds = getSuperAdminIds();
+  if (!superAdminIds.includes(ctx.from.id)) {
     return ctx.reply('⛔ Super Admin access required.');
   }
   return next();
 };
 
 const registerSuperAdminHandlers = (bot) => {
+
+  const isSuperAdminUser = (telegramId) => {
+    const superAdminIds = getSuperAdminIds();
+    return superAdminIds.includes(telegramId);
+  };
 
   // ── Admin management ───────────────────────────────────────────────────────
   bot.command('addadmin', requireSuperAdmin, async (ctx) => {
@@ -250,6 +268,120 @@ const registerSuperAdminHandlers = (bot) => {
       await ctx.reply(msg, { parse_mode: 'Markdown' });
     } catch (err) {
       await ctx.reply('❌ Error fetching plan stats.');
+    }
+  });
+
+  // ── Seller withdrawal management ──────────────────────────────────────────
+  bot.command('sellerwithdrawals', requireSuperAdmin, async (ctx) => {
+    const items = await getPendingSellerWithdrawalRequests(20);
+    if (!items.length) return ctx.reply('✅ No pending seller withdrawals.');
+
+    let msg = '💸 *Pending Seller Withdrawals*\n\n';
+    items.forEach((item, i) => {
+      msg += `${i + 1}. ID: \`${item._id}\`\n`;
+      msg += `   Seller: \`${item.sellerTelegramId}\`\n`;
+      msg += `   Amount: *₹${Number(item.amount).toFixed(2)}*\n`;
+      msg += `   Requested: ${new Date(item.requestedAt).toLocaleString('en-IN')}\n\n`;
+    });
+
+    msg += 'Approve: `/approvesellerwd <requestId>`\n';
+    msg += 'Reject: `/rejectsellerwd <requestId> | reason`';
+    await ctx.reply(msg, { parse_mode: 'Markdown' });
+  });
+
+  bot.command('approvesellerwd', requireSuperAdmin, async (ctx) => {
+    const requestId = (ctx.message.text.split(' ')[1] || '').trim();
+    if (!requestId) return ctx.reply('Usage: /approvesellerwd <requestId>');
+
+    try {
+      const request = await approveSellerWithdrawal(requestId, ctx.from.id);
+      await safeSend(
+        bot,
+        request.sellerTelegramId,
+        `✅ *Seller Withdrawal Approved*\n\n` +
+        `Request ID: \`${request._id}\`\n` +
+        `Amount: *₹${Number(request.amount).toFixed(2)}*\n\n` +
+        `Payout will be processed shortly.`,
+        { parse_mode: 'Markdown' }
+      );
+
+      await ctx.reply(`✅ Approved withdrawal \`${request._id}\` for ₹${Number(request.amount).toFixed(2)}.`, { parse_mode: 'Markdown' });
+    } catch (err) {
+      await ctx.reply(`❌ ${err.message}`);
+    }
+  });
+
+  bot.command('rejectsellerwd', requireSuperAdmin, async (ctx) => {
+    const raw = ctx.message.text.replace('/rejectsellerwd', '').trim();
+    const [requestIdPart, ...rest] = raw.split('|');
+    const requestId = (requestIdPart || '').trim();
+    const reason = rest.join('|').trim();
+
+    if (!requestId) return ctx.reply('Usage: /rejectsellerwd <requestId> | reason');
+
+    try {
+      const request = await rejectSellerWithdrawal(requestId, ctx.from.id, reason);
+      await safeSend(
+        bot,
+        request.sellerTelegramId,
+        `❌ *Seller Withdrawal Rejected*\n\n` +
+        `Request ID: \`${request._id}\`\n` +
+        `Amount: *₹${Number(request.amount).toFixed(2)}*\n` +
+        `${request.note ? `Reason: ${request.note}\n` : ''}`,
+        { parse_mode: 'Markdown' }
+      );
+
+      await ctx.reply(`✅ Rejected withdrawal \`${request._id}\`.`, { parse_mode: 'Markdown' });
+    } catch (err) {
+      await ctx.reply(`❌ ${err.message}`);
+    }
+  });
+
+  bot.action(/^swd_(approve|reject)_(.+)$/, async (ctx) => {
+    const action = ctx.match[1];
+    const requestId = ctx.match[2];
+
+    if (!isSuperAdminUser(ctx.from.id)) {
+      return ctx.answerCbQuery('⛔ Super Admin only', { show_alert: true });
+    }
+
+    await ctx.answerCbQuery(action === 'approve' ? 'Approving...' : 'Rejecting...');
+
+    try {
+      let request;
+      if (action === 'approve') {
+        request = await approveSellerWithdrawal(requestId, ctx.from.id);
+        await safeSend(
+          bot,
+          request.sellerTelegramId,
+          `✅ *Seller Withdrawal Approved*\n\n` +
+          `Request ID: \`${request._id}\`\n` +
+          `Amount: *₹${Number(request.amount).toFixed(2)}*\n\n` +
+          `Payout will be processed shortly.`,
+          { parse_mode: 'Markdown' }
+        );
+      } else {
+        request = await rejectSellerWithdrawal(requestId, ctx.from.id, 'Rejected from inline action');
+        await safeSend(
+          bot,
+          request.sellerTelegramId,
+          `❌ *Seller Withdrawal Rejected*\n\n` +
+          `Request ID: \`${request._id}\`\n` +
+          `Amount: *₹${Number(request.amount).toFixed(2)}*\n` +
+          `Reason: ${request.note}`,
+          { parse_mode: 'Markdown' }
+        );
+      }
+
+      try {
+        await ctx.editMessageText(
+          `${ctx.callbackQuery.message.text}\n\n` +
+          `${action === 'approve' ? '✅ *APPROVED*' : '❌ *REJECTED*'} by ${ctx.from.username ? '@' + ctx.from.username : ctx.from.id}`,
+          { parse_mode: 'Markdown' }
+        );
+      } catch (_) { }
+    } catch (err) {
+      await ctx.answerCbQuery(`❌ ${err.message}`, { show_alert: true });
     }
   });
 

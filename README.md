@@ -55,7 +55,7 @@ npm start
 | `MONGO_URI` | ✅ | MongoDB connection string |
 | `PREMIUM_GROUP_ID` | ✅ | Group ID (negative number) |
 | `LOG_CHANNEL_ID` | ✅ | Log channel ID (negative number) |
-| `SUPER_ADMIN_ID` | ✅ | Your Telegram user ID |
+| `SUPER_ADMIN_IDS` | ✅ | Comma-separated Telegram user IDs for super admins (e.g. `123,456`) |
 | `BONUS_REFERRAL_DAYS` | ❌ | Default: 3 |
 | `GRACE_PERIOD_DAYS` | ❌ | Default: 3 |
 | `PORT` | ❌ | Health check port |

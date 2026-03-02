@@ -19,17 +19,132 @@ const {
   forwardUserMessage,
   closeTicket,
   getActiveTicket,
-  getTodayTicketCount,
   SUPPORT_CONTACT,
 } = require('../services/supportService');
-const { processReferral } = require('../services/referralService');
+const {
+  processReferral,
+  processSellerReferral,
+  registerSellerProgram,
+  getSellerProgramSummary,
+  requestSellerWithdrawal,
+} = require('../services/referralService');
 const { safeSend, renewalKeyboard, isGroupMember } = require('../utils/telegramUtils');
 const { formatDate, daysRemaining } = require('../utils/dateUtils');
 const logger = require('../utils/logger');
 
 const REJOINING_PENALTY = process.env.REJOINING_PENALTY || '20';
+const lastBotMessageByChat = new Map();
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Button coloring (Bot API 9.4+). Older clients ignore `style`.
+ * Styles: 'primary' (blue), 'success' (green), 'danger' (red)
+ */
+const withStyle = (button, style) => ({ ...button, style });
+
+const escapeMarkdown = (value) => {
+  return String(value ?? '').replace(/([_*`\[])/g, '\\$1');
+};
+
+const isMessageNotModifiedError = (err) => {
+  const message = err?.response?.description || err?.description || err?.message || '';
+  return String(message).toLowerCase().includes('message is not modified');
+};
+
+const safeEditReplyMarkup = async (ctx, keyboard) => {
+  try {
+    await ctx.editMessageReplyMarkup(keyboard.reply_markup || keyboard);
+  } catch (err) {
+    if (!isMessageNotModifiedError(err)) throw err;
+  }
+};
+
+const sellerProgramKeyboard = (isRegistered, canWithdraw = false) => {
+  const rows = [
+    [withStyle(Markup.button.callback(isRegistered ? '📊 Refresh Seller Dashboard' : '🛍 Register as Seller', isRegistered ? 'seller_program' : 'register_seller'), 'primary')],
+  ];
+
+  if (isRegistered) {
+    rows.push([withStyle(Markup.button.callback('💸 Request Withdrawal', 'seller_withdraw'), canWithdraw ? 'success' : 'primary')]);
+  }
+
+  rows.push([withStyle(Markup.button.callback('⬅️ Back', 'more_menu'), 'success')]);
+  return Markup.inlineKeyboard(rows);
+};
+
+const formatSellerProgramMessage = (summary, botUsername) => {
+  if (!summary?.isSeller) {
+    return (
+      `🛍 *Seller Program*\n\n` +
+      `Seller banke aap premium refer karke earning kar sakte hain.\n` +
+      `Har successful paid referral par *15% commission* milega.\n\n` +
+      `Withdrawal eligibility:\n` +
+      `• ${summary?.withdrawRules?.minReferrals || 10} qualified referrals *ya*\n` +
+      `• ₹${summary?.withdrawRules?.minBalance || 200} balance\n\n` +
+      `Niche button dabakar seller program join karein.`
+    );
+  }
+
+  const sellerLink = `https://t.me/${botUsername}?start=seller_${summary.sellerCode}`;
+  return (
+    `🛍 *Seller Dashboard*\n\n` +
+    `✅ Status: *Registered Seller*\n` +
+    `🧾 Seller Code: \`${summary.sellerCode}\`\n` +
+    `👥 Total Referred: *${summary.stats.totalReferrals || 0}*\n` +
+    `✅ Qualified Referrals: *${summary.stats.qualifiedReferrals || 0}*\n` +
+    `💰 Lifetime Earnings: *₹${Number(summary.stats.lifetimeEarnings || 0).toFixed(2)}*\n` +
+    `💳 Available Balance: *₹${Number(summary.stats.availableBalance || 0).toFixed(2)}*\n\n` +
+    `🔗 *Your Seller Link:*\n\`${sellerLink}\`\n\n` +
+    (summary.canWithdraw
+      ? `✅ You are eligible to request withdrawal.`
+      : `ℹ️ Withdrawal unlock: ${summary.withdrawRules.minReferrals} qualified referrals *or* ₹${summary.withdrawRules.minBalance} balance.`)
+  );
+};
+
+const supportCancelKeyboard = () => Markup.inlineKeyboard([
+  [withStyle(Markup.button.callback('❌ Cancel Support Chat', 'cancel_support'), 'danger')],
+]);
+
+const replacePreviousBotReply = async (ctx, chatId, sentMessage) => {
+  if (!sentMessage?.message_id) return;
+
+  const key = String(chatId);
+  const previousMessageId = lastBotMessageByChat.get(key);
+
+  if (previousMessageId && previousMessageId !== sentMessage.message_id) {
+    await ctx.telegram.deleteMessage(chatId, previousMessageId).catch(() => { });
+  }
+
+  lastBotMessageByChat.set(key, sentMessage.message_id);
+};
+
+const notifySellerWithdrawalRequest = async (bot, ctx, request) => {
+  if (!process.env.LOG_CHANNEL_ID) return;
+
+  const sellerName = ctx.from?.first_name || 'Seller';
+  const sellerUsername = ctx.from?.username ? `@${ctx.from.username}` : 'N/A';
+
+  await bot.telegram.sendMessage(
+    process.env.LOG_CHANNEL_ID,
+    `💸 *New Seller Withdrawal Request*\n\n` +
+    `Request ID: \`${request._id}\`\n` +
+    `Seller: *${sellerName}*\n` +
+    `Seller ID: \`${request.sellerTelegramId}\`\n` +
+    `Username: ${sellerUsername}\n` +
+    `Amount: *₹${Number(request.amount).toFixed(2)}*\n` +
+    `Requested At: ${new Date(request.requestedAt).toLocaleString('en-IN')}`,
+    {
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [[
+          { text: '✅ Approve', callback_data: `swd_approve_${request._id}` },
+          { text: '❌ Reject', callback_data: `swd_reject_${request._id}` },
+        ]],
+      },
+    }
+  ).catch(() => { });
+};
 
 /**
  * Build the approval keyboard for log channel requests.
@@ -43,26 +158,26 @@ const buildApprovalKeyboard = async (requestId) => {
     const rows = [];
     for (let i = 0; i < plans.length; i += 2) {
       rows.push(
-        plans.slice(i, i + 2).map(p => ({
+        plans.slice(i, i + 2).map(p => withStyle({
           text: `${p.name} (${p.durationDays}d${p.price ? ` · ₹${p.price}` : ''})`,
           callback_data: `approve_${requestId}_${p._id}`,
-        }))
+        }, 'success'))
       );
     }
     planButtons = rows;
   } else {
     planButtons = [[
-      { text: '30 Days', callback_data: `approve_${requestId}_30` },
-      { text: '90 Days', callback_data: `approve_${requestId}_90` },
-      { text: '180 Days', callback_data: `approve_${requestId}_180` },
-      { text: '365 Days', callback_data: `approve_${requestId}_365` },
+      withStyle({ text: '30 Days', callback_data: `approve_${requestId}_30` }, 'success'),
+      withStyle({ text: '90 Days', callback_data: `approve_${requestId}_90` }, 'success'),
+      withStyle({ text: '180 Days', callback_data: `approve_${requestId}_180` }, 'success'),
+      withStyle({ text: '365 Days', callback_data: `approve_${requestId}_365` }, 'success'),
     ]];
   }
 
   return {
     inline_keyboard: [
       ...planButtons,
-      [{ text: '❌ Reject', callback_data: `reject_${requestId}` }],
+      [withStyle({ text: '❌ Reject', callback_data: `reject_${requestId}` }, 'danger')],
     ],
   };
 };
@@ -70,6 +185,28 @@ const buildApprovalKeyboard = async (requestId) => {
 // ── Register handlers ─────────────────────────────────────────────────────────
 
 const registerUserHandlers = (bot) => {
+
+  bot.use(async (ctx, next) => {
+    if (ctx.chat?.type !== 'private') return next();
+
+    const incomingUserMessageId = ctx.message?.message_id;
+    let userMessageDeleted = false;
+    const originalReply = ctx.reply.bind(ctx);
+
+    ctx.reply = async (text, extra) => {
+      const sent = await originalReply(text, extra);
+
+      if (incomingUserMessageId && !userMessageDeleted) {
+        userMessageDeleted = true;
+        await ctx.telegram.deleteMessage(ctx.chat.id, incomingUserMessageId).catch(() => { });
+      }
+
+      await replacePreviousBotReply(ctx, ctx.chat.id, sent);
+      return sent;
+    };
+
+    return next();
+  });
 
   // ── /start ─────────────────────────────────────────────────────────────────
   bot.start(async (ctx) => {
@@ -79,7 +216,9 @@ const registerUserHandlers = (bot) => {
 
       // Referral: /start ref_XXXXXXXX
       const payload = ctx.startPayload;
-      if (payload && payload.startsWith('ref_')) {
+      if (payload && payload.startsWith('seller_')) {
+        await processSellerReferral(user, payload.replace('seller_', ''));
+      } else if (payload && payload.startsWith('ref_')) {
         await processReferral(user, payload.replace('ref_', ''));
       }
 
@@ -87,16 +226,13 @@ const registerUserHandlers = (bot) => {
 
       await ctx.reply(
         `${isNew ? '👋 Welcome' : '👋 Welcome back'}, *${user.name}*!\n\n` +
-        `I manage access to the *Premium Group*.\n` +
-        `Choose an option below to get started:`,
+        `Ye Apka *Premium Manager* BOT Hai.\n\n` +
+        `Apne Premium Ke Liye Pay Kar Diya Hai To Niche Diye Gaye Button Pe Click Kro : Premium Join Request\n`,
         {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
-            [Markup.button.callback('🌟 Request Premium Access', 'request_access')],
-            [Markup.button.callback('📊 My Subscription Status', 'check_status')],
-            [Markup.button.callback('🎁 View Current Offers', 'view_offers')],
-            [Markup.button.callback('🤝 My Referral Link', 'my_referral')],
-            [Markup.button.callback('🎫 Contact Support', 'open_support')],
+            [withStyle(Markup.button.callback('🌟 Premium Access Request', 'request_access'), 'success')],
+            [withStyle(Markup.button.callback('📋 More Menu', 'more_menu'), 'primary')],
           ]),
         }
       );
@@ -104,6 +240,94 @@ const registerUserHandlers = (bot) => {
       logger.error(`/start error: ${err.message}`);
       await ctx.reply('❌ Something went wrong. Please try again.');
     }
+  });
+
+  // ── More Menu ───────────────────────────────────────────────────────────────
+  bot.action('more_menu', async (ctx) => {
+    await ctx.answerCbQuery();
+    // Replace buttons on the same welcome message
+    const keyboard = Markup.inlineKeyboard([
+      [withStyle(Markup.button.callback('📊 Check Subscription Status', 'check_status'), 'primary')],
+      [withStyle(Markup.button.callback('🎁 View Current Offers', 'view_offers'), 'primary')],
+      [withStyle(Markup.button.callback('🤝 My Referral Link', 'my_referral'), 'primary')],
+      [withStyle(Markup.button.callback('🛍 Seller Program', 'seller_program'), 'primary')],
+      [Markup.button.callback('🎫 Contact Support', 'open_support')],
+      [withStyle(Markup.button.callback('⬅️ Back', 'back_to_main'), 'success')],
+    ]);
+    await safeEditReplyMarkup(ctx, keyboard);
+  });
+
+  // ── Seller Program ───────────────────────────────────────────────────────
+  const showSellerProgram = async (ctx) => {
+    const summary = await getSellerProgramSummary(ctx.from.id);
+    if (!summary) return ctx.reply('❌ User not found. Please use /start first.');
+
+    const botInfo = await bot.telegram.getMe();
+    await ctx.reply(
+      formatSellerProgramMessage(summary, botInfo.username),
+      {
+        parse_mode: 'Markdown',
+        ...sellerProgramKeyboard(summary.isSeller, summary.canWithdraw),
+      }
+    );
+  };
+
+  bot.action('seller_program', async (ctx) => {
+    await ctx.answerCbQuery();
+    await showSellerProgram(ctx);
+  });
+
+  bot.action('register_seller', async (ctx) => {
+    await ctx.answerCbQuery('Registering...');
+    try {
+      await registerSellerProgram(ctx.from.id);
+      await showSellerProgram(ctx);
+    } catch (err) {
+      logger.error(`register_seller error: ${err.message}`);
+      await ctx.reply('❌ Seller registration failed. Please try again.');
+    }
+  });
+
+  bot.command('seller', showSellerProgram);
+
+  bot.action('seller_withdraw', async (ctx) => {
+    await ctx.answerCbQuery('Processing...');
+    try {
+      const req = await requestSellerWithdrawal(ctx.from.id);
+      await notifySellerWithdrawalRequest(bot, ctx, req);
+      await ctx.reply(
+        `✅ *Withdrawal Request Submitted*\n\n` +
+        `Request ID: \`${req._id}\`\n` +
+        `Amount: *₹${Number(req.amount).toFixed(2)}*\n\n` +
+        `Admin review ke baad payout process hoga.`,
+        { parse_mode: 'Markdown' }
+      );
+    } catch (err) {
+      await ctx.reply(`⚠️ ${err.message}`);
+    }
+  });
+
+  bot.command('sellerwithdraw', async (ctx) => {
+    try {
+      const req = await requestSellerWithdrawal(ctx.from.id);
+      await notifySellerWithdrawalRequest(bot, ctx, req);
+      await ctx.reply(
+        `✅ Withdrawal request created. ID: \`${req._id}\` | Amount: *₹${Number(req.amount).toFixed(2)}*`,
+        { parse_mode: 'Markdown' }
+      );
+    } catch (err) {
+      await ctx.reply(`⚠️ ${err.message}`);
+    }
+  });
+
+  // ── Back to main menu (same message) ────────────────────────────────────────
+  bot.action('back_to_main', async (ctx) => {
+    await ctx.answerCbQuery();
+    const keyboard = Markup.inlineKeyboard([
+      [withStyle(Markup.button.callback('🌟 Premium Access Request', 'request_access'), 'success')],
+      [withStyle(Markup.button.callback('📋 More Menu', 'more_menu'), 'primary')],
+    ]);
+    await safeEditReplyMarkup(ctx, keyboard);
   });
 
   // ── Request Premium Access ─────────────────────────────────────────────────
@@ -116,7 +340,7 @@ const registerUserHandlers = (bot) => {
       const activeSub = await getActiveSubscription(ctx.from.id);
       if (activeSub) {
         return ctx.reply(
-          `✅ *You already have an active subscription!*\n\n` +
+          `✅ *Aapka subscription active hai!*\n\n` +
           `📋 Plan: *${activeSub.planName}*\n` +
           `📅 Expires: *${formatDate(activeSub.expiryDate)}*`,
           { parse_mode: 'Markdown' }
@@ -127,8 +351,9 @@ const registerUserHandlers = (bot) => {
       if (pendingReq) {
         return ctx.reply(
           `⏳ *Request Already Submitted*\n\n` +
-          `Your request is currently under review.\n` +
-          `Please wait — you'll be notified once an admin approves it.`,
+          `Admin aapki request verify kar rahe hain.\n` +
+          `Verification ke baad aapko jaldi se joining link mil jayega.\n\n` +
+          `⏱  Usually 20 minutes ke andar approval mil jata hai. Thoda wait karein please.`,
           { parse_mode: 'Markdown' }
         );
       }
@@ -142,26 +367,35 @@ const registerUserHandlers = (bot) => {
       await User.findByIdAndUpdate(user._id, { status: 'pending' });
 
       await ctx.reply(
-        `✅ *Request Submitted Successfully!*\n\n` +
-        `Our admin team has been notified.\n` +
-        `You will receive your access details here as soon as it's approved.\n\n` +
-        `⏱ Usually approved within a few minutes.`,
+        `✅ _Premium joining request successfully!_\n\n` +
+        `Admin aapki payment verify kar rahe hain.\n\n` +
+        `Verification ke baad aapko jaldi se joining link mil jayega.\n\n` +
+        `⏱  Usually 20 minutes ke andar approval mil jata hai. Thoda wait karein please.`,
         { parse_mode: 'Markdown' }
       );
 
       const keyboard = await buildApprovalKeyboard(newRequest._id);
+      const safeName = escapeMarkdown(user.name);
+      const safeUsername = user.username ? `@${escapeMarkdown(user.username)}` : 'N/A';
+      const referredByUser = user.referredBy || null;
+      const referredBySeller = user.sellerReferredBy || null;
       const logMsg = await bot.telegram.sendMessage(
         process.env.LOG_CHANNEL_ID,
         `🆕 *New Premium Access Request*\n\n` +
-        `👤 Name: ${user.name}\n` +
+        `👤 Name: ${safeName}\n` +
         `🆔 User ID: \`${ctx.from.id}\`\n` +
-        `📛 Username: ${user.username ? '@' + user.username : 'N/A'}\n` +
+        `📛 Username: ${safeUsername}\n` +
+        `🤝 Referred By (User): \`${referredByUser || 'N/A'}\`\n` +
+        `🛍 Referred By (Seller): \`${referredBySeller || 'N/A'}\`\n` +
+        `🎯 Referred To: \`${ctx.from.id}\`\n` +
         `🕒 Time: ${new Date().toLocaleString('en-IN')}`,
         { parse_mode: 'Markdown', reply_markup: keyboard }
       );
 
       await Request.findByIdAndUpdate(newRequest._id, { logMessageId: logMsg.message_id });
-      logger.info(`New access request: user ${ctx.from.id}`);
+      logger.info(
+        `New access request: referredByUser=${referredByUser || 'N/A'}, referredBySeller=${referredBySeller || 'N/A'}, referredTo=${ctx.from.id}`
+      );
     } catch (err) {
       logger.error(`request_access error: ${err.message}`);
       await ctx.reply('❌ An error occurred. Please try again.');
@@ -182,9 +416,8 @@ const registerUserHandlers = (bot) => {
       const existing = await getPendingRequest(ctx.from.id);
       if (existing) {
         return ctx.reply(
-          `⏳ *Renewal Already Pending*\n\n` +
-          `You already have a pending renewal request.\n` +
-          `Please wait for admin approval.`,
+          `⏳ *Renewal Pending hai!*\n\n` +
+          `Admin approval ka wait kijiye.`,
           { parse_mode: 'Markdown' }
         );
       }
@@ -196,25 +429,30 @@ const registerUserHandlers = (bot) => {
       });
 
       await ctx.reply(
-        `🔄 *Renewal Request Submitted!*\n\n` +
+        `🔄 *Aapka Renewal Request Submit Ho Gaya Hai!*\n\n` +
         `📋 Plan: *${plan.name}* (${plan.durationDays} days${plan.price ? ` · ₹${plan.price}` : ''})\n\n` +
-        `You'll be notified once approved.`,
+        `Apko jald se jald notification mil jayega.`,
         { parse_mode: 'Markdown' }
       );
 
       const logMsg = await bot.telegram.sendMessage(
         process.env.LOG_CHANNEL_ID,
-        `🔄 *Renewal Request*\n\n` +
-        `👤 Name: ${user.name}\n` +
-        `🆔 ID: \`${ctx.from.id}\`\n` +
-        `📛 Username: ${user.username ? '@' + user.username : 'N/A'}\n` +
-        `📋 Plan: ${plan.name} (${plan.durationDays} days${plan.price ? ` · ₹${plan.price}` : ''})`,
+        (() => {
+          const safeName = escapeMarkdown(user.name);
+          const safeUsername = user.username ? `@${escapeMarkdown(user.username)}` : 'N/A';
+          const safePlanName = escapeMarkdown(plan.name);
+          return `🔄 *Renewal Request*\n\n` +
+            `👤 Name: ${safeName}\n` +
+            `🆔 ID: \`${ctx.from.id}\`\n` +
+            `📛 Username: ${safeUsername}\n` +
+            `📋 Plan: ${safePlanName} (${plan.durationDays} days${plan.price ? ` · ₹${plan.price}` : ''})`;
+        })(),
         {
           parse_mode: 'Markdown',
           reply_markup: {
             inline_keyboard: [[
-              { text: `✅ Approve`, callback_data: `approve_${renewalReq._id}_${plan._id}` },
-              { text: '❌ Reject', callback_data: `reject_${renewalReq._id}` },
+              withStyle({ text: `✅ Approve`, callback_data: `approve_${renewalReq._id}_${plan._id}` }, 'success'),
+              withStyle({ text: '❌ Reject', callback_data: `reject_${renewalReq._id}` }, 'danger'),
             ]],
           },
         }
@@ -238,9 +476,9 @@ const registerUserHandlers = (bot) => {
         const inGroup = await isGroupMember(bot, process.env.PREMIUM_GROUP_ID, ctx.from.id);
 
         const groupWarning = !inGroup
-          ? `\n⚠️ *You are not in the Premium Group!*\n` +
-            `A rejoining penalty of *₹${REJOINING_PENALTY}* applies.\n` +
-            `Please contact support using /support.\n`
+          ? `\n⚠️ *Aap Premium Group Me Nahi Hai!*\n` +
+          `Apne galti se leave kiya hai toh *₹${REJOINING_PENALTY}* dena parega.\n` +
+          `Support se baat karne ke liye /support likhen.\n`
           : '';
 
         return ctx.reply(
@@ -250,7 +488,7 @@ const registerUserHandlers = (bot) => {
           `📅 Expires on: *${formatDate(activeSub.expiryDate)}*\n` +
           `⏳ Days Remaining: *${remaining} days*\n` +
           groupWarning +
-          (plans.length ? `\n💡 Want to extend? Choose a plan below:` : ''),
+          (plans.length ? `\n💡 Aapko extend karna hai toh niche diye gaye plans se select karein:` : ''),
           {
             parse_mode: 'Markdown',
             reply_markup: plans.length ? renewalKeyboard(plans) : undefined,
@@ -267,8 +505,8 @@ const registerUserHandlers = (bot) => {
         return ctx.reply(
           `⚠️ *Subscription Expired — Grace Period*\n\n` +
           `Your subscription expired ${daysOverdue} day(s) ago.\n` +
-          `⏳ *${left} grace day(s) remaining* before you are removed from the group.\n\n` +
-          `Renew now to keep your access:`,
+          `⏳ *${left} grace day(s)* k baad aap group se remove ho jayenge.\n\n` +
+          `Apne premium ko renew karne ke liye niche diye gaye plans se select karein:`,
           {
             parse_mode: 'Markdown',
             reply_markup: plans.length ? renewalKeyboard(plans) : undefined,
@@ -278,12 +516,12 @@ const registerUserHandlers = (bot) => {
 
       await ctx.reply(
         `❌ *No Active Subscription*\n\n` +
-        `You don't currently have an active subscription.\n` +
-        `Tap below to request access:`,
+        `Aapka koi subscription active nahi hai.\n` +
+        `Niche diye gaye button pe click karein premium join request:`,
         {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
-            [Markup.button.callback('🌟 Request Access', 'request_access')],
+            [withStyle(Markup.button.callback('🌟 Request Access', 'request_access'), 'success')],
           ]),
         }
       );
@@ -307,8 +545,8 @@ const registerUserHandlers = (bot) => {
 
       if (!offers.length) {
         return ctx.reply(
-          `😔 *No Active Offers Right Now*\n\n` +
-          `Check back soon — we regularly add new deals!`,
+          `😔 *Koi active offers nahi hai abhi filhaal!*\n\n` +
+          `New offer aane pe aapko notification mil jayega.`,
           { parse_mode: 'Markdown' }
         );
       }
@@ -366,8 +604,7 @@ const registerUserHandlers = (bot) => {
   // How it works for the USER:
   //   1. User taps "Contact Support" or sends /support
   //   2. Bot checks: already have open ticket? → just send messages
-  //      Already used today's ticket? → redirect to SUPPORT_CONTACT
-  //      First time today? → create topic + let them type
+  //      If no open ticket → create topic + let them type
   //   3. Every message user sends is forwarded into the forum topic
   //   4. Admin replies in topic → bot sends reply to user's DM automatically
   //   5. User sends /cancel → chat ends, topic archived
@@ -386,43 +623,35 @@ const registerUserHandlers = (bot) => {
       const existing = await getActiveTicket(userId);
       if (existing) {
         return ctx.reply(
-          `💬 *Support Chat Already Open*\n\n` +
+          `💬 *Support Chat pehle se chalu hai*\n\n` +
           `Ticket: \`${existing.ticketId}\`\n\n` +
-          `Just send your message here — our team will reply shortly.\n\n` +
-          `📌 Send /cancel if you want to close this support chat.`,
-          { parse_mode: 'Markdown' }
+          `Apna message type kijiye — hamari tem jald hin reply karegi.\n\n` +
+          `📌 Support chat close karne ke liye niche button use kijiye.`,
+          {
+            parse_mode: 'Markdown',
+            ...supportCancelKeyboard(),
+          }
         );
       }
 
-      // Case 2: Daily limit reached → redirect
-      const todayCount = await getTodayTicketCount(userId);
-      if (todayCount >= 1) {
-        return ctx.reply(
-          `⚠️ *Daily Support Limit Reached*\n\n` +
-          `You can only open *1 support chat per day* through this bot.\n\n` +
-          `For additional help, please contact us directly:\n` +
-          `👉 ${SUPPORT_CONTACT}`,
-          { parse_mode: 'Markdown' }
-        );
-      }
-
-      // Case 3: First ticket today → prompt for message
+      // Case 2: No open ticket → prompt for message
       // We set a flag in User doc so next message creates the ticket
       await User.findOneAndUpdate({ telegramId: userId }, { $set: { 'meta.awaitingSupport': true } });
 
       await ctx.reply(
         `🎫 *Contact Support*\n\n` +
         `Hi ${user.name}! 👋\n\n` +
-        `Just type your question or issue below and send it.\n` +
-        `Our support team will reply here in your chat.\n\n` +
+
         `━━━━━━━━━━━━━━━━\n` +
         `📌 *Tips for faster help:*\n` +
-        `• Describe your issue clearly\n` +
-        `• Include your User ID if asked: \`${userId}\`\n` +
-        `• One message is fine — add details after\n` +
+        `• Apna samasya ko detail me likh k bhejen.\n` +
+        `• Hamari support team jald hin reply karegi.\n` +
         `━━━━━━━━━━━━━━━━\n\n` +
-        `Send /cancel to cancel.`,
-        { parse_mode: 'Markdown' }
+        `Chat ko close karne ke liye niche button use kijiye!`,
+        {
+          parse_mode: 'Markdown',
+          ...supportCancelKeyboard(),
+        }
       );
     } catch (err) {
       logger.error(`openSupportChat error: ${err.message}`);
@@ -437,24 +666,31 @@ const registerUserHandlers = (bot) => {
 
   bot.command('support', openSupportChat);
 
-  // ── /cancel — user closes their support chat ──────────────────────────────
-  bot.command('cancel', async (ctx) => {
+  const closeSupportChat = async (ctx) => {
     const userId = ctx.from.id;
     try {
-      // Clear awaiting flag
       await User.findOneAndUpdate({ telegramId: userId }, { $unset: { 'meta.awaitingSupport': '' } });
 
       const ticket = await getActiveTicket(userId);
       if (!ticket) {
-        return ctx.reply('ℹ️ You have no open support chat to cancel.');
+        return ctx.reply('ℹ️ Aapke paas koi open support chat nahi hai.');
       }
 
       await closeTicket(bot, ticket.topicId, null, true);
-      // closeTicket already sends the DM to the user
     } catch (err) {
-      logger.error(`/cancel error: ${err.message}`);
+      logger.error(`closeSupportChat error: ${err.message}`);
       await ctx.reply('❌ Error closing chat. Please try again.');
     }
+  };
+
+  bot.action('cancel_support', async (ctx) => {
+    await ctx.answerCbQuery('Closing support chat...');
+    await closeSupportChat(ctx);
+  });
+
+  // ── /cancel — user closes their support chat ──────────────────────────────
+  bot.command('cancel', async (ctx) => {
+    await closeSupportChat(ctx);
   });
 
   // ── Text handler: intercept user messages for active support chats ─────────
@@ -468,7 +704,7 @@ const registerUserHandlers = (bot) => {
     // Skip commands
     if (text.startsWith('/')) return next();
 
-    await User.findOneAndUpdate({ telegramId: userId }, { lastInteraction: new Date() }).catch(() => {});
+    await User.findOneAndUpdate({ telegramId: userId }, { lastInteraction: new Date() }).catch(() => { });
 
     try {
       const user = await findOrCreateUser(ctx.from);
@@ -490,27 +726,17 @@ const registerUserHandlers = (bot) => {
         await User.findOneAndUpdate({ telegramId: userId }, { $unset: { 'meta.awaitingSupport': '' } });
 
         let ticket;
-        try {
-          ticket = await openTicket(bot, user, text);
-        } catch (err) {
-          if (err.code === 'DAILY_LIMIT_REACHED') {
-            return ctx.reply(
-              `⚠️ *Daily Limit Reached*\n\n` +
-              `You can only open 1 support chat per day.\n` +
-              `Contact: ${SUPPORT_CONTACT}`,
-              { parse_mode: 'Markdown' }
-            );
-          }
-          throw err;
-        }
+        ticket = await openTicket(bot, user, text);
 
         await ctx.reply(
           `✅ *Support Chat Connected!*\n\n` +
           `Ticket ID: \`${ticket.ticketId}\`\n\n` +
           `Our team has been notified and will reply to you here.\n` +
-          `You can keep sending messages — they all go to the same chat.\n\n` +
-          `📌 Send /cancel to close this support chat anytime.`,
-          { parse_mode: 'Markdown' }
+          `📌 Support chat close karne ke liye niche button use kijiye.`,
+          {
+            parse_mode: 'Markdown',
+            ...supportCancelKeyboard(),
+          }
         );
 
       } else if (activeTicket) {
@@ -520,7 +746,7 @@ const registerUserHandlers = (bot) => {
         }
         await forwardUserMessage(bot, activeTicket, user, text);
         // Small confirmation tick so user knows message was delivered
-        await ctx.react('👍').catch(() => {}); // reaction if supported, else silent
+        await ctx.react('👍').catch(() => { }); // reaction if supported, else silent
       }
 
     } catch (err) {

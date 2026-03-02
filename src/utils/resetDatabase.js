@@ -1,7 +1,7 @@
 // resetDatabase.js
 // Clears all collections in the connected MongoDB database
 
-require('dotenv').config();
+require('dotenv').config({ override: true });
 const mongoose = require('mongoose');
 const logger = require('./logger');
 const dns = require('dns');

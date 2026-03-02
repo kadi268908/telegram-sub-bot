@@ -46,7 +46,7 @@ const handleBlockedUser = async (bot, telegramId) => {
       process.env.LOG_CHANNEL_ID,
       `🚫 *Bot Blocked*\nUser ID: \`${telegramId}\` has blocked the bot.\nStatus updated to blocked.`,
       { parse_mode: 'Markdown' }
-    ).catch(() => {});
+    ).catch(() => { });
 
     logger.warn(`User ${telegramId} has blocked the bot — marked as blocked`);
   } catch (e) {
@@ -55,16 +55,14 @@ const handleBlockedUser = async (bot, telegramId) => {
 };
 
 /**
- * Generate a one-time invite link expiring in 10 minutes
- * member_limit = 1 ensures link can only be used once
+ * Generate a single-use invite link with no time expiration.
+ * member_limit = 1 ensures link can only be used once.
  */
-const generateInviteLink = async (bot, groupId, userId, subscriptionExpiry) => {
+const generateInviteLink = async (bot, groupId, userId) => {
   try {
-    const expireAt = new Date(Date.now() + 10 * 60 * 1000); // +10 minutes
     const invite = await bot.telegram.createChatInviteLink(groupId, {
       name: `User_${userId}`,
       member_limit: 1,
-      expire_date: Math.floor(expireAt.getTime() / 1000),
     });
     return invite.invite_link;
   } catch (err) {

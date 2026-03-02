@@ -5,6 +5,25 @@ const mongoose = require('mongoose');
 const dns = require('dns');
 const logger = require('../utils/logger');
 
+const normalizeMongoUri = (value) => {
+  if (!value) return value;
+
+  let normalized = String(value).trim();
+
+  if (
+    (normalized.startsWith('"') && normalized.endsWith('"')) ||
+    (normalized.startsWith("'") && normalized.endsWith("'"))
+  ) {
+    normalized = normalized.slice(1, -1).trim();
+  }
+
+  if (normalized.startsWith('MONGO_URI=')) {
+    normalized = normalized.slice('MONGO_URI='.length).trim();
+  }
+
+  return normalized;
+};
+
 const connectDB = async () => {
   try {
     const dnsServersRaw = process.env.MONGO_DNS_SERVERS;
@@ -20,7 +39,9 @@ const connectDB = async () => {
       }
     }
 
-    const conn = await mongoose.connect(process.env.MONGO_URI, {
+    const mongoUri = normalizeMongoUri(process.env.MONGO_URI);
+
+    const conn = await mongoose.connect(mongoUri, {
       serverSelectionTimeoutMS: 5000,
       socketTimeoutMS: 45000,
     });

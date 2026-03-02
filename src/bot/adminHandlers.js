@@ -13,7 +13,7 @@ const Plan = require('../models/Plan');
 const AdminLog = require('../models/AdminLog');
 const { createSubscription } = require('../services/subscriptionService');
 const { approveRequest, rejectRequest, getActivePlans } = require('../services/adminService');
-const { awardReferralBonus } = require('../services/referralService');
+const { awardReferralBonus, awardSellerCommission } = require('../services/referralService');
 const {
   forwardAdminReply,
   closeTicket,
@@ -71,7 +71,7 @@ const registerAdminHandlers = (bot) => {
       await forwardAdminReply(bot, ticket, adminName, text);
 
       // React with a checkmark in the topic to confirm delivery
-      await ctx.react('✅').catch(() => {});
+      await ctx.react('✅').catch(() => { });
 
       logger.info(`Admin ${ctx.from.id} replied to ticket ${ticket.ticketId} → user ${ticket.telegramId}`);
     } catch (err) {
@@ -104,7 +104,7 @@ const registerAdminHandlers = (bot) => {
           `🕒 ${new Date().toLocaleString('en-IN')}`,
           { parse_mode: 'Markdown' }
         );
-      } catch (_) {}
+      } catch (_) { }
 
       logger.info(`Ticket ${ticket.ticketId} closed by admin ${ctx.from.id}`);
     } catch (err) {
@@ -147,6 +147,7 @@ const registerAdminHandlers = (bot) => {
       const alreadyInGroup = await isGroupMember(bot, process.env.PREMIUM_GROUP_ID, request.telegramId);
 
       let userMessage;
+      const extra = { parse_mode: 'Markdown' };
       if (subscription.isRenewal && alreadyInGroup) {
         // Renewal — user stays in group, no invite needed
         userMessage =
@@ -154,8 +155,8 @@ const registerAdminHandlers = (bot) => {
           `📋 Plan: *${plan.name}*\n` +
           `➕ Extended by: *${plan.durationDays} days*\n` +
           `📅 New Expiry: *${formatDate(subscription.expiryDate)}*\n\n` +
-          `You remain in the Premium Group — no action needed.\n\n` +
-          `Thank you for renewing! 🙏`;
+          `Apka premium renew ho gaya hai. \n\n` +
+          `Thank you! 🙏`;
       } else {
         // New subscription or user left group — generate invite link
         const inviteLink = await generateInviteLink(
@@ -173,15 +174,23 @@ const registerAdminHandlers = (bot) => {
           `📅 Valid for: *${plan.durationDays} days*\n` +
           `⏰ Expires on: *${formatDate(subscription.expiryDate)}*\n\n` +
           (inviteLink
-            ? `🔗 *Join the Premium Group:*\n${inviteLink}\n\n` +
-              `⚠️ This link is *single-use* and expires in *10 minutes*.\n\n`
+            ? `🔗 *Premium Group join kijiye niche diye gai button pe click karke*\n\n` +
+            `⚠️ Yeh single-use link hai. Kripya iss link ko share na kare nahi to aap ban ho shakte hain.\n\n`
             : '') +
           `Thank you for joining! 🙏\n\n` +
-          `📌 Do not block this bot — you need it for subscription updates.`;
+          `📌 Iss bot ko block nahi kijiyega nahi to aage aane waale offers miss ho jayenge.`;
+
+        // Send invite as a button instead of plain text URL
+        if (inviteLink) {
+          extra.reply_markup = {
+            inline_keyboard: [[{ text: '🔗 Join Premium Group', url: inviteLink }]],
+          };
+        }
       }
 
-      await safeSend(bot, request.telegramId, userMessage, { parse_mode: 'Markdown' });
+      await safeSend(bot, request.telegramId, userMessage, extra);
       await awardReferralBonus(bot, request.telegramId);
+      await awardSellerCommission(bot, request.telegramId, plan.price || 0);
 
       // Edit log channel message
       try {
@@ -192,7 +201,7 @@ const registerAdminHandlers = (bot) => {
           (subscription.isRenewal ? ' [RENEWAL]' : ''),
           { parse_mode: 'Markdown' }
         );
-      } catch (_) {}
+      } catch (_) { }
 
       await logToChannel(bot,
         `✅ *Subscription ${subscription.isRenewal ? 'Renewed' : 'Approved'}*\n` +
@@ -230,8 +239,8 @@ const registerAdminHandlers = (bot) => {
 
       await safeSend(bot, request.telegramId,
         `❌ *Request Not Approved*\n\n` +
-        `Your access request was reviewed but could not be approved at this time.\n\n` +
-        `You may submit a new request using /start.`,
+        `Aaoka request reject kar diya gaya hai.\n\n` +
+        `Agar koi galti hui hai to krpiya support team se contact karein. /support \n\n`,
         { parse_mode: 'Markdown' }
       );
 
@@ -241,7 +250,7 @@ const registerAdminHandlers = (bot) => {
           `\n\n❌ *REJECTED* by ${ctx.from.username ? '@' + ctx.from.username : ctx.from.id}`,
           { parse_mode: 'Markdown' }
         );
-      } catch (_) {}
+      } catch (_) { }
 
       await logToChannel(bot,
         `❌ *Request Rejected*\nUser: \`${request.telegramId}\`\n` +

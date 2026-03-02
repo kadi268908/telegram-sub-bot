@@ -1,0 +1,40 @@
+const mongoose = require('mongoose');
+
+const sellerWithdrawalRequestSchema = new mongoose.Schema({
+    sellerTelegramId: {
+        type: Number,
+        required: true,
+        index: true,
+    },
+    amount: {
+        type: Number,
+        required: true,
+        min: 0,
+    },
+    status: {
+        type: String,
+        enum: ['pending', 'approved', 'rejected'],
+        default: 'pending',
+        index: true,
+    },
+    requestedAt: {
+        type: Date,
+        default: Date.now,
+        index: true,
+    },
+    reviewedAt: {
+        type: Date,
+        default: null,
+    },
+    reviewedBy: {
+        type: Number,
+        default: null,
+    },
+    note: {
+        type: String,
+        trim: true,
+        default: '',
+    },
+}, { timestamps: true });
+
+module.exports = mongoose.model('SellerWithdrawalRequest', sellerWithdrawalRequestSchema);

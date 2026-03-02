@@ -14,7 +14,8 @@ const Offer = require('../models/Offer');
 const Plan = require('../models/Plan');
 const AdminLog = require('../models/AdminLog');
 const { buildDailySummary } = require('./analyticsService');
-const { safeSend, generateInviteLink, isGroupMember, banFromGroup, renewalKeyboard } = require('../utils/telegramUtils');
+const { safeSend, isGroupMember, banFromGroup, renewalKeyboard } = require('../utils/telegramUtils');
+const { SUPPORT_CONTACT } = require('./supportService');
 const { addDays, formatDate, startOfToday } = require('../utils/dateUtils');
 const logger = require('../utils/logger');
 
@@ -213,7 +214,7 @@ const inactiveUserDetector = async (bot) => {
 
 // ── 4. MEMBERSHIP MONITOR ─────────────────────────────────────────────────────
 // Runs daily at 11:00 AM
-// - Active sub but not in group → resend invite
+// - Active sub but not in group → ask user to contact support
 // - Expired but still in group → ban
 const membershipMonitor = async (bot) => {
   logger.info('[CRON] Running membershipMonitor...');
@@ -227,17 +228,11 @@ const membershipMonitor = async (bot) => {
   for (const sub of activeSubs) {
     const inGroup = await isGroupMember(bot, process.env.PREMIUM_GROUP_ID, sub.telegramId);
     if (!inGroup) {
-      // User has active sub but not in group — resend invite
-      const link = await generateInviteLink(bot, process.env.PREMIUM_GROUP_ID, sub.telegramId);
-      if (link) {
-        sub.inviteLink = link;
-        await sub.save();
-        await safeSend(bot, sub.telegramId,
-          `🔗 *Rejoining Instructions*\n\nYou have an active subscription but aren't in the group.\nHere's a new invite link:\n\n${link}\n\n⚠️ This link expires in 10 minutes and is single-use.`,
-          { parse_mode: 'Markdown' }
-        );
-        logger.info(`Resent invite to active user ${sub.telegramId}`);
-      }
+      await safeSend(bot, sub.telegramId,
+        `⚠️ *Rejoining Required*\n\nYou have an active subscription but aren't in the premium group.\n\nPlease contact support to get rejoined:\n👉 ${SUPPORT_CONTACT}`,
+        { parse_mode: 'Markdown' }
+      );
+      logger.info(`Sent support rejoin instruction to active user ${sub.telegramId}`);
     }
   }
 
@@ -294,12 +289,12 @@ const offerExpiryChecker = async () => {
 
 // ── INIT: Register all cron schedules ─────────────────────────────────────────
 const initCronJobs = (bot) => {
-  cron.schedule('0 8 * * *',  () => reminderScheduler(bot));    // 8:00 AM
-  cron.schedule('0 9 * * *',  () => gracePeriodHandler(bot));   // 9:00 AM
+  cron.schedule('0 8 * * *', () => reminderScheduler(bot));    // 8:00 AM
+  cron.schedule('0 9 * * *', () => gracePeriodHandler(bot));   // 9:00 AM
   cron.schedule('0 10 * * *', () => inactiveUserDetector(bot)); // 10:00 AM
   cron.schedule('0 11 * * *', () => membershipMonitor(bot));    // 11:00 AM
-  cron.schedule('59 23 * * *',() => dailySummaryJob(bot));      // 23:59
-  cron.schedule('5 0 * * *',  () => offerExpiryChecker());      // 00:05
+  cron.schedule('59 23 * * *', () => dailySummaryJob(bot));      // 23:59
+  cron.schedule('5 0 * * *', () => offerExpiryChecker());      // 00:05
 
   logger.info('All cron jobs initialized.');
 };

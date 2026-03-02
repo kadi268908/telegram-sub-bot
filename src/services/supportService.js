@@ -6,7 +6,6 @@
 //   User messages → forwarded into that topic
 //   Admin replies in topic → bot forwards reply back to user's DM
 //   Admin closes topic (button) → user notified, topic archived
-//   1 ticket per user per day enforced via openedDate
 //   Overflow → SUPPORT_CONTACT
 
 const SupportTicket = require('../models/SupportTicket');
@@ -18,13 +17,6 @@ const SUPPORT_GROUP_ID = process.env.SUPPORT_GROUP_ID;
 
 // Today as YYYY-MM-DD
 const todayStr = () => new Date().toISOString().slice(0, 10);
-
-/**
- * Count tickets this user has opened today
- */
-const getTodayTicketCount = async (telegramId) => {
-  return SupportTicket.countDocuments({ telegramId, openedDate: todayStr() });
-};
 
 /**
  * Get the user's currently open ticket (if any)
@@ -42,17 +34,8 @@ const getTicketByTopicId = async (topicId) => {
 
 /**
  * Create a new forum topic + ticket record.
- * Throws { code: 'DAILY_LIMIT_REACHED' } if user already used their daily ticket.
  */
 const openTicket = async (bot, user, firstMessage) => {
-  // Daily limit check
-  const count = await getTodayTicketCount(user.telegramId);
-  if (count >= 1) {
-    const err = new Error('DAILY_LIMIT_REACHED');
-    err.code = 'DAILY_LIMIT_REACHED';
-    throw err;
-  }
-
   // Create a forum topic named after the user
   const topicName = `${user.name} · ${user.telegramId}`;
   const topic = await bot.telegram.createForumTopic(SUPPORT_GROUP_ID, topicName, {
@@ -201,7 +184,6 @@ module.exports = {
   closeTicket,
   getActiveTicket,
   getTicketByTopicId,
-  getTodayTicketCount,
   getOpenTickets,
   SUPPORT_CONTACT,
   SUPPORT_GROUP_ID,
