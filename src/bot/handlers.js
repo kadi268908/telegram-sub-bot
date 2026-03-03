@@ -11,6 +11,7 @@ const User = require('../models/User');
 const Request = require('../models/Request');
 const Subscription = require('../models/Subscription');
 const Plan = require('../models/Plan');
+const UserOffer = require('../models/UserOffer');
 
 const { findOrCreateUser, getActiveSubscription, getPendingRequest } = require('../services/userService');
 const { getActiveOffers, getActivePlans } = require('../services/adminService');
@@ -52,9 +53,9 @@ const isMessageNotModifiedError = (err) => {
   return String(message).toLowerCase().includes('message is not modified');
 };
 
-const safeEditReplyMarkup = async (ctx, keyboard) => {
+const safeEditMessage = async (ctx, text, extra = {}) => {
   try {
-    await ctx.editMessageReplyMarkup(keyboard.reply_markup || keyboard);
+    await ctx.editMessageText(text, extra);
   } catch (err) {
     if (!isMessageNotModifiedError(err)) throw err;
   }
@@ -146,6 +147,28 @@ const notifySellerWithdrawalRequest = async (bot, ctx, request) => {
   ).catch(() => { });
 };
 
+const consumeOneTimeUserOffer = async (telegramId, requestId) => {
+  return UserOffer.findOneAndUpdate(
+    {
+      targetTelegramId: telegramId,
+      isActive: true,
+      isUsed: false,
+      validTill: { $gt: new Date() },
+    },
+    {
+      $set: {
+        isUsed: true,
+        usedAt: new Date(),
+        usedByRequestId: requestId,
+      },
+    },
+    {
+      sort: { createdAt: 1 },
+      new: true,
+    }
+  );
+};
+
 /**
  * Build the approval keyboard for log channel requests.
  * Uses real plans from DB if any exist; falls back to hardcoded day options.
@@ -230,8 +253,9 @@ const registerUserHandlers = (bot) => {
 
       await ctx.reply(
         `${isNew ? '👋 Welcome' : '👋 Welcome back'}, *${user.name}*!\n\n` +
-        `Ye Apka *Premium Manager* BOT Hai.\n\n` +
-        `Apne Premium Ke Liye Pay Kar Diya Hai To Niche Diye Gaye Button Pe Click Kro : Premium Join Request\n`,
+        `*AK Imax Premium Manager BOT me aapka swaagat hai!*\n\n` +
+        `Aapne Premium Ke Liye Pay Kar Diya Hai To Niche Diye Gaye Button Pe Click Kro.\n\n` +
+        `*🚨 Note: Bina payment ke request karne par admin aapko* _BAN_ *kar shakte hain, isliye bina payment ke request na karein.*\n\n`,
         {
           parse_mode: 'Markdown',
           ...Markup.inlineKeyboard([
@@ -249,7 +273,6 @@ const registerUserHandlers = (bot) => {
   // ── More Menu ───────────────────────────────────────────────────────────────
   bot.action('more_menu', async (ctx) => {
     await ctx.answerCbQuery();
-    // Replace buttons on the same welcome message
     const keyboard = Markup.inlineKeyboard([
       [withStyle(Markup.button.callback('📊 Check Subscription Status', 'check_status'), 'primary')],
       [withStyle(Markup.button.callback('🎁 View Current Offers', 'view_offers'), 'primary')],
@@ -258,7 +281,14 @@ const registerUserHandlers = (bot) => {
       [Markup.button.callback('🎫 Contact Support', 'open_support')],
       [withStyle(Markup.button.callback('⬅️ Back', 'back_to_main'), 'success')],
     ]);
-    await safeEditReplyMarkup(ctx, keyboard);
+    await safeEditMessage(
+      ctx,
+      `📋 *More Menu*\n\nNiche diye gaye options me se koi bhi choose karein.`,
+      {
+        parse_mode: 'Markdown',
+        ...keyboard,
+      }
+    );
   });
 
   // ── Seller Program ───────────────────────────────────────────────────────
@@ -331,7 +361,14 @@ const registerUserHandlers = (bot) => {
       [withStyle(Markup.button.callback('🌟 Premium Access Request', 'request_access'), 'success')],
       [withStyle(Markup.button.callback('📋 More Menu', 'more_menu'), 'primary')],
     ]);
-    await safeEditReplyMarkup(ctx, keyboard);
+    await safeEditMessage(
+      ctx,
+      `👋 *Welcome!*\n\nYe apka *Premium Manager* bot hai.\n\nPremium ke liye payment ho gaya ho to niche diye gaye button par click karein:`,
+      {
+        parse_mode: 'Markdown',
+        ...keyboard,
+      }
+    );
   });
 
   // ── Request Premium Access ─────────────────────────────────────────────────
@@ -368,12 +405,26 @@ const registerUserHandlers = (bot) => {
         status: 'pending',
       });
 
+      const consumedOffer = await consumeOneTimeUserOffer(ctx.from.id, newRequest._id);
+      if (consumedOffer) {
+        await Request.findByIdAndUpdate(newRequest._id, {
+          appliedUserOffer: {
+            offerId: consumedOffer._id,
+            title: consumedOffer.title,
+            discountPercent: consumedOffer.discountPercent,
+          },
+        });
+      }
+
       await User.findByIdAndUpdate(user._id, { status: 'pending' });
 
       await ctx.reply(
         `✅ _Premium joining request successfully!_\n\n` +
         `Admin aapki payment verify kar rahe hain.\n\n` +
         `Verification ke baad aapko jaldi se joining link mil jayega.\n\n` +
+        (consumedOffer
+          ? `🎁 *Private offer applied:* ${escapeMarkdown(consumedOffer.title)}${consumedOffer.discountPercent > 0 ? ` (*${consumedOffer.discountPercent}% OFF*)` : ''}\n\n`
+          : '') +
         `⏱  Usually 20 minutes ke andar approval mil jata hai. Thoda wait karein please.`,
         { parse_mode: 'Markdown' }
       );
@@ -391,6 +442,9 @@ const registerUserHandlers = (bot) => {
         `📛 Username: ${safeUsername}\n` +
         `🤝 Referred By (User): \`${referredByUser || 'N/A'}\`\n` +
         `🛍 Referred By (Seller): \`${referredBySeller || 'N/A'}\`\n` +
+        (consumedOffer
+          ? `🎁 Private Offer: *${escapeMarkdown(consumedOffer.title)}*${consumedOffer.discountPercent > 0 ? ` (*${consumedOffer.discountPercent}% OFF*)` : ''}\n`
+          : '') +
         `🎯 Referred To: \`${ctx.from.id}\`\n` +
         `🕒 Time: ${new Date().toLocaleString('en-IN')}`,
         { parse_mode: 'Markdown', reply_markup: keyboard }
@@ -432,9 +486,23 @@ const registerUserHandlers = (bot) => {
         status: 'pending',
       });
 
+      const consumedOffer = await consumeOneTimeUserOffer(ctx.from.id, renewalReq._id);
+      if (consumedOffer) {
+        await Request.findByIdAndUpdate(renewalReq._id, {
+          appliedUserOffer: {
+            offerId: consumedOffer._id,
+            title: consumedOffer.title,
+            discountPercent: consumedOffer.discountPercent,
+          },
+        });
+      }
+
       await ctx.reply(
         `🔄 *Aapka Renewal Request Submit Ho Gaya Hai!*\n\n` +
         `📋 Plan: *${plan.name}* (${plan.durationDays} days${plan.price ? ` · ₹${plan.price}` : ''})\n\n` +
+        (consumedOffer
+          ? `🎁 *Private offer applied:* ${escapeMarkdown(consumedOffer.title)}${consumedOffer.discountPercent > 0 ? ` (*${consumedOffer.discountPercent}% OFF*)` : ''}\n\n`
+          : '') +
         `Apko jald se jald notification mil jayega.`,
         { parse_mode: 'Markdown' }
       );
@@ -449,6 +517,9 @@ const registerUserHandlers = (bot) => {
             `👤 Name: ${safeName}\n` +
             `🆔 ID: \`${ctx.from.id}\`\n` +
             `📛 Username: ${safeUsername}\n` +
+            (consumedOffer
+              ? `🎁 Private Offer: *${escapeMarkdown(consumedOffer.title)}*${consumedOffer.discountPercent > 0 ? ` (*${consumedOffer.discountPercent}% OFF*)` : ''}\n`
+              : '') +
             `📋 Plan: ${safePlanName} (${plan.durationDays} days${plan.price ? ` · ₹${plan.price}` : ''})`;
         })(),
         {
@@ -588,8 +659,14 @@ const registerUserHandlers = (bot) => {
     try {
       await User.findOneAndUpdate({ telegramId: ctx.from.id }, { lastInteraction: new Date() });
       const offers = await getActiveOffers();
+      const privateOffers = await UserOffer.find({
+        targetTelegramId: ctx.from.id,
+        isActive: true,
+        isUsed: false,
+        validTill: { $gt: new Date() },
+      }).sort({ createdAt: -1 });
 
-      if (!offers.length) {
+      if (!offers.length && !privateOffers.length) {
         return ctx.reply(
           `😔 *Koi active offers nahi hai abhi filhaal!*\n\n` +
           `New offer aane pe aapko notification mil jayega.`,
@@ -598,6 +675,21 @@ const registerUserHandlers = (bot) => {
       }
 
       let message = `🎁 *Current Offers*\n\n`;
+      if (privateOffers.length) {
+        message += `⭐ *Your Private One-Time Offers*\n\n`;
+        privateOffers.forEach((offer, i) => {
+          const days = Math.max(0, Math.ceil((new Date(offer.validTill) - new Date()) / 86400000));
+          message += `*${i + 1}. ${escapeMarkdown(offer.title)}*\n`;
+          message += `${escapeMarkdown(offer.description)}\n`;
+          if (offer.discountPercent > 0) message += `💰 *${offer.discountPercent}% OFF*\n`;
+          message += `⏰ Expires in *${days} day${days !== 1 ? 's' : ''}*\n`;
+          message += `ℹ️ *Auto-applies on your next request/renewal (one time only).*\n\n`;
+        });
+      }
+
+      if (offers.length) {
+        message += `🎁 *Public Offers*\n\n`;
+      }
       offers.forEach((offer, i) => {
         const days = Math.max(0, Math.ceil((new Date(offer.validTill) - new Date()) / 86400000));
         message += `*${i + 1}. ${offer.title}*\n`;

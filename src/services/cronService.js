@@ -287,6 +287,62 @@ const offerExpiryChecker = async () => {
   }
 };
 
+// ── 7. INVITE LINK EXPIRY NOTIFIER ───────────────────────────────────────────
+// Runs every 15 minutes
+// If invite link expired and user still not in group, notify user once and guide next step.
+const inviteLinkExpiryNotifier = async (bot) => {
+  logger.info('[CRON] Running inviteLinkExpiryNotifier...');
+  const now = new Date();
+
+  const subsWithInvite = await Subscription.find({
+    status: { $in: ['active', 'grace'] },
+    inviteLink: { $ne: null },
+    inviteLinkIssuedAt: { $ne: null },
+  }).select('telegramId planName inviteLink inviteLinkIssuedAt inviteLinkTtlMinutes');
+
+  for (const sub of subsWithInvite) {
+    const ttlMinutes = Math.max(1, parseInt(sub.inviteLinkTtlMinutes || process.env.INVITE_LINK_TTL_MINUTES || '10', 10));
+    const expiresAt = new Date(sub.inviteLinkIssuedAt.getTime() + ttlMinutes * 60 * 1000);
+    if (now <= expiresAt) continue;
+
+    const inGroup = await isGroupMember(bot, process.env.PREMIUM_GROUP_ID, sub.telegramId);
+    if (inGroup) {
+      await Subscription.findByIdAndUpdate(sub._id, {
+        inviteLink: null,
+        inviteLinkIssuedAt: null,
+        inviteLinkTtlMinutes: null,
+      });
+      continue;
+    }
+
+    const sent = await safeSend(
+      bot,
+      sub.telegramId,
+      `⌛ *Your invite link has expired.*\n\n` +
+      `Naya invite link lene ke liye support se contact karein\n\n` +
+      `/support command use karein.`,
+      { parse_mode: 'Markdown' }
+    );
+
+    if (sent) {
+      await Subscription.findByIdAndUpdate(sub._id, {
+        inviteLink: null,
+        inviteLinkIssuedAt: null,
+        inviteLinkTtlMinutes: null,
+      });
+
+      await logToChannel(
+        bot,
+        `⚠️ *Expired Invite link Notice*\n` +
+        `UserID: \`${sub.telegramId}\`\n` +
+        `Plan subscribed: *${sub.planName || 'N/A'}*`
+      );
+
+      logger.info(`Expired invite notice sent to ${sub.telegramId}`);
+    }
+  }
+};
+
 // ── INIT: Register all cron schedules ─────────────────────────────────────────
 const initCronJobs = (bot) => {
   cron.schedule('0 8 * * *', () => reminderScheduler(bot));    // 8:00 AM
@@ -295,6 +351,7 @@ const initCronJobs = (bot) => {
   cron.schedule('0 11 * * *', () => membershipMonitor(bot));    // 11:00 AM
   cron.schedule('59 23 * * *', () => dailySummaryJob(bot));      // 23:59
   cron.schedule('5 0 * * *', () => offerExpiryChecker());      // 00:05
+  cron.schedule('*/15 * * * *', () => inviteLinkExpiryNotifier(bot)); // every 15 min
 
   logger.info('All cron jobs initialized.');
 };
@@ -308,4 +365,5 @@ module.exports = {
   membershipMonitor,
   dailySummaryJob,
   offerExpiryChecker,
+  inviteLinkExpiryNotifier,
 };

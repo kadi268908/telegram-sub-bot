@@ -41,6 +41,21 @@ const requestSchema = new mongoose.Schema({
     type: Number, // message ID in log channel for editing
     default: null,
   },
+  appliedUserOffer: {
+    offerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'UserOffer',
+      default: null,
+    },
+    title: {
+      type: String,
+      default: null,
+    },
+    discountPercent: {
+      type: Number,
+      default: 0,
+    },
+  },
 }, { timestamps: true });
 
 module.exports = mongoose.model('Request', requestSchema);

@@ -51,6 +51,14 @@ const subscriptionSchema = new mongoose.Schema({
     type: String,
     default: null,
   },
+  inviteLinkIssuedAt: {
+    type: Date,
+    default: null,
+  },
+  inviteLinkTtlMinutes: {
+    type: Number,
+    default: null,
+  },
   reminderFlags: {
     day7: { type: Boolean, default: false },
     day3: { type: Boolean, default: false },

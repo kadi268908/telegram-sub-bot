@@ -10,7 +10,9 @@
 const User = require('../models/User');
 const Request = require('../models/Request');
 const Plan = require('../models/Plan');
+const Subscription = require('../models/Subscription');
 const AdminLog = require('../models/AdminLog');
+const UserOffer = require('../models/UserOffer');
 const { createSubscription } = require('../services/subscriptionService');
 const { approveRequest, rejectRequest, getActivePlans } = require('../services/adminService');
 const { awardReferralBonus, awardSellerCommission } = require('../services/referralService');
@@ -21,10 +23,17 @@ const {
   getOpenTickets,
   SUPPORT_GROUP_ID,
 } = require('../services/supportService');
-const { formatDate, daysRemaining } = require('../utils/dateUtils');
+const { formatDate, daysRemaining, addDays, startOfToday } = require('../utils/dateUtils');
 const { logToChannel } = require('../services/cronService');
-const { generateInviteLink, isGroupMember, safeSend } = require('../utils/telegramUtils');
+const { generateInviteLink, isGroupMember, safeSend, banFromGroup, unbanFromGroup } = require('../utils/telegramUtils');
 const logger = require('../utils/logger');
+
+const getSuperAdminIds = () => {
+  return String(process.env.SUPER_ADMIN_IDS || process.env.SUPER_ADMIN_ID || '')
+    .split(',')
+    .map(id => parseInt(id.trim(), 10))
+    .filter(Boolean);
+};
 
 const requireAdmin = async (ctx, next) => {
   const user = await User.findOne({ telegramId: ctx.from.id });
@@ -164,8 +173,11 @@ const registerAdminHandlers = (bot) => {
         );
 
         if (inviteLink) {
-          const Subscription = require('../models/Subscription');
-          await Subscription.findByIdAndUpdate(subscription._id, { inviteLink });
+          await Subscription.findByIdAndUpdate(subscription._id, {
+            inviteLink,
+            inviteLinkIssuedAt: new Date(),
+            inviteLinkTtlMinutes: Math.max(1, parseInt(process.env.INVITE_LINK_TTL_MINUTES || '10', 10)),
+          });
         }
 
         userMessage =
@@ -183,7 +195,7 @@ const registerAdminHandlers = (bot) => {
         // Send invite as a button instead of plain text URL
         if (inviteLink) {
           extra.reply_markup = {
-            inline_keyboard: [[{ text: '🔗 Join Premium Group', url: inviteLink }]],
+            inline_keyboard: [[{ text: '🔗 Join Premium Group', url: inviteLink, style: 'success' }]],
           };
         }
       }
@@ -277,7 +289,6 @@ const registerAdminHandlers = (bot) => {
     const user = await User.findOne({ telegramId: targetId });
     if (!user) return ctx.reply(`❌ User \`${targetId}\` not found.`, { parse_mode: 'Markdown' });
 
-    const Subscription = require('../models/Subscription');
     const activeSub = await Subscription.findOne({
       telegramId: targetId, status: 'active', expiryDate: { $gt: new Date() },
     });
@@ -304,6 +315,704 @@ const registerAdminHandlers = (bot) => {
     if (user.referredBy) msg += `\n🤝 Referred by: \`${user.referredBy}\`\n`;
 
     await ctx.reply(msg, { parse_mode: 'Markdown' });
+  });
+
+  // ── /legacyadd <planIdOrDays>|<DD/MM/YYYY>|<id1,id2,...> ─────────────────
+  bot.command('legacyadd', requireAdmin, async (ctx) => {
+    try {
+      if (!getSuperAdminIds().includes(ctx.from.id)) {
+        return ctx.reply('⛔ Super Admin access required for /legacyadd.');
+      }
+
+      const raw = String(ctx.message?.text || '').replace('/legacyadd', '').trim();
+      const [planPart, datePart, idsPart] = raw.split('|').map(s => s.trim());
+
+      if (!planPart || !datePart || !idsPart) {
+        return ctx.reply(
+          'Usage: `/legacyadd <planIdOrDays>|<DD/MM/YYYY>|<id1,id2,id3,...>`',
+          { parse_mode: 'Markdown' }
+        );
+      }
+
+      let plan = await Plan.findById(planPart).catch(() => null);
+      if (!plan) {
+        const days = parseInt(planPart, 10);
+        if (!days) {
+          return ctx.reply('❌ Invalid plan value. Use planId or duration in days.');
+        }
+        plan = await Plan.findOne({ durationDays: days, isActive: true });
+        if (!plan) {
+          plan = await Plan.create({ name: `${days} Days Plan`, durationDays: days, price: 0 });
+        }
+      }
+
+      const [d, m, y] = String(datePart).split('/').map(v => parseInt(v, 10));
+      const expiryDate = new Date(y, (m || 1) - 1, d || 1, 23, 59, 59, 999);
+      if (!d || !m || !y || Number.isNaN(expiryDate.getTime())) {
+        return ctx.reply('❌ Invalid date format. Use DD/MM/YYYY.');
+      }
+      if (expiryDate <= new Date()) {
+        return ctx.reply('❌ Expiry date must be in the future.');
+      }
+
+      const ids = [...new Set(
+        idsPart
+          .split(',')
+          .map(s => parseInt(s.trim(), 10))
+          .filter(Boolean)
+      )];
+
+      if (!ids.length) {
+        return ctx.reply('❌ No valid user IDs found.');
+      }
+
+      if (ids.length > 200) {
+        return ctx.reply('❌ Max 200 users per command. Please split into smaller batches.');
+      }
+
+      const startDate = new Date(expiryDate.getTime() - (plan.durationDays * 24 * 60 * 60 * 1000));
+
+      let imported = 0;
+      let updated = 0;
+      let skippedNotInGroup = 0;
+      let skippedInvalid = 0;
+      const failedIds = [];
+
+      for (const telegramId of ids) {
+        try {
+          const inGroup = await isGroupMember(bot, process.env.PREMIUM_GROUP_ID, telegramId);
+          if (!inGroup) {
+            skippedNotInGroup++;
+            continue;
+          }
+
+          let user = await User.findOne({ telegramId });
+          if (!user) {
+            user = await User.create({
+              telegramId,
+              name: `Legacy User ${telegramId}`,
+              username: null,
+              role: 'user',
+              status: 'active',
+            });
+          }
+
+          const existingSub = await Subscription.findOne({
+            telegramId,
+            status: { $in: ['active', 'grace'] },
+          }).sort({ createdAt: -1 });
+
+          if (existingSub) {
+            existingSub.planId = plan._id;
+            existingSub.planName = plan.name;
+            existingSub.durationDays = plan.durationDays;
+            existingSub.startDate = startDate;
+            existingSub.expiryDate = expiryDate;
+            existingSub.status = 'active';
+            existingSub.approvedBy = ctx.from.id;
+            existingSub.isRenewal = false;
+            existingSub.graceDaysUsed = 0;
+            existingSub.graceNotifications = { day1: false, day2: false, day3: false };
+            existingSub.reminderFlags = { day7: false, day3: false, day1: false, day0: false };
+            await existingSub.save();
+            updated++;
+          } else {
+            await Subscription.create({
+              userId: user._id,
+              telegramId,
+              planId: plan._id,
+              planName: plan.name,
+              durationDays: plan.durationDays,
+              startDate,
+              expiryDate,
+              status: 'active',
+              approvedBy: ctx.from.id,
+              isRenewal: false,
+            });
+            imported++;
+          }
+
+          await User.findOneAndUpdate(
+            { telegramId },
+            { status: 'active', isBlocked: false, graceDaysRemaining: null, lastInteraction: new Date() }
+          );
+        } catch (e) {
+          skippedInvalid++;
+          failedIds.push(telegramId);
+        }
+      }
+
+      await AdminLog.create({
+        adminId: ctx.from.id,
+        actionType: 'legacy_import',
+        details: {
+          plan: plan.name,
+          durationDays: plan.durationDays,
+          expiryDate,
+          totalInput: ids.length,
+          imported,
+          updated,
+          skippedNotInGroup,
+          skippedInvalid,
+          failedIds: failedIds.slice(0, 20),
+        },
+      });
+
+      await ctx.reply(
+        `✅ *Legacy Import Complete*\n\n` +
+        `📥 Total IDs: *${ids.length}*\n` +
+        `🆕 Imported: *${imported}*\n` +
+        `♻️ Updated: *${updated}*\n` +
+        `⛔ Not in group: *${skippedNotInGroup}*\n` +
+        `⚠️ Failed: *${skippedInvalid}*\n\n` +
+        `Plan: *${plan.name}* (${plan.durationDays} days)\n` +
+        `Expiry: *${formatDate(expiryDate)}*`,
+        { parse_mode: 'Markdown' }
+      );
+    } catch (err) {
+      logger.error(`legacyadd command error: ${err.message}`);
+      await ctx.reply('❌ Failed legacy import. Please check command format and try again.');
+    }
+  });
+
+  // ── /revokeplan <telegramId> — terminate plan and remove from group ───────
+  bot.command('revokeplan', requireAdmin, async (ctx) => {
+    try {
+      const parts = String(ctx.message?.text || '').trim().split(/\s+/);
+      if (parts.length < 2) {
+        return ctx.reply('Usage: /revokeplan <telegramId>');
+      }
+
+      const targetId = parseInt(parts[1], 10);
+      if (!targetId) {
+        return ctx.reply('❌ Invalid telegramId. Usage: /revokeplan <telegramId>');
+      }
+
+      const targetUser = await User.findOne({ telegramId: targetId });
+      if (!targetUser) {
+        return ctx.reply(`❌ User \`${targetId}\` not found.`, { parse_mode: 'Markdown' });
+      }
+
+      const activeSub = await Subscription.findOne({
+        telegramId: targetId,
+        status: { $in: ['active', 'grace'] },
+      }).sort({ createdAt: -1 });
+
+      if (!activeSub) {
+        return ctx.reply('ℹ️ No active/grace subscription found for this user.');
+      }
+
+      const revokedAt = new Date();
+      activeSub.status = 'cancelled';
+      activeSub.expiryDate = revokedAt;
+      activeSub.graceDaysUsed = 0;
+      activeSub.graceNotifications = { day1: false, day2: false, day3: false };
+      await activeSub.save();
+
+      await User.findOneAndUpdate(
+        { telegramId: targetId },
+        { status: 'inactive', graceDaysRemaining: null, lastInteraction: new Date() }
+      );
+
+      if (process.env.PREMIUM_GROUP_ID) {
+        await banFromGroup(bot, process.env.PREMIUM_GROUP_ID, targetId);
+        await unbanFromGroup(bot, process.env.PREMIUM_GROUP_ID, targetId);
+      }
+
+      await safeSend(
+        bot,
+        targetId,
+        `⚠️ *Your subscription has been revoked by admin.*\n\n` +
+        `Agar koi issue hai to support se contact karein: ${process.env.SUPPORT_CONTACT || '@ImaxSupport1Bot'}`,
+        { parse_mode: 'Markdown' }
+      );
+
+      await AdminLog.create({
+        adminId: ctx.from.id,
+        actionType: 'manual_expire',
+        targetUserId: targetId,
+        details: {
+          reason: 'Revoke incorrect approval',
+          revokedSubscriptionId: activeSub._id,
+          previousPlan: activeSub.planName,
+        },
+      });
+
+      await ctx.reply(
+        `✅ Plan revoked for user \`${targetId}\`.\nPrevious plan: *${activeSub.planName}*\nUser removed from premium group.`,
+        { parse_mode: 'Markdown' }
+      );
+    } catch (err) {
+      logger.error(`revokeplan command error: ${err.message}`);
+      await ctx.reply('❌ Failed to revoke plan. Please try again.');
+    }
+  });
+
+  // ── /modifyplan <telegramId>|<planIdOrDays> — correct wrong plan ─────────
+  bot.command('modifyplan', requireAdmin, async (ctx) => {
+    try {
+      const raw = String(ctx.message?.text || '').replace('/modifyplan', '').trim();
+      const [idPart, planPart] = raw.split('|').map(s => s.trim());
+
+      if (!idPart || !planPart) {
+        return ctx.reply('Usage: `/modifyplan <telegramId>|<planIdOrDays>`', { parse_mode: 'Markdown' });
+      }
+
+      const targetId = parseInt(idPart, 10);
+      if (!targetId) {
+        return ctx.reply('❌ Invalid telegramId.');
+      }
+
+      const targetUser = await User.findOne({ telegramId: targetId });
+      if (!targetUser) {
+        return ctx.reply(`❌ User \`${targetId}\` not found.`, { parse_mode: 'Markdown' });
+      }
+
+      let plan = await Plan.findById(planPart).catch(() => null);
+      if (!plan) {
+        const days = parseInt(planPart, 10);
+        if (!days) {
+          return ctx.reply('❌ Invalid plan value. Use planId or duration in days.');
+        }
+        plan = await Plan.findOne({ durationDays: days, isActive: true });
+      }
+
+      if (!plan) {
+        return ctx.reply('❌ Plan not found. Use `/plans` to see active plans.', { parse_mode: 'Markdown' });
+      }
+
+      const activeSub = await Subscription.findOne({
+        telegramId: targetId,
+        status: { $in: ['active', 'grace'] },
+      }).sort({ createdAt: -1 });
+
+      if (!activeSub) {
+        return ctx.reply('ℹ️ No active/grace subscription found for this user to modify.');
+      }
+
+      const previousPlan = activeSub.planName;
+      const now = new Date();
+      const newExpiry = new Date(now.getTime() + (plan.durationDays * 24 * 60 * 60 * 1000));
+
+      activeSub.planId = plan._id;
+      activeSub.planName = plan.name;
+      activeSub.durationDays = plan.durationDays;
+      activeSub.startDate = now;
+      activeSub.expiryDate = newExpiry;
+      activeSub.status = 'active';
+      activeSub.approvedBy = ctx.from.id;
+      activeSub.isRenewal = false;
+      activeSub.graceDaysUsed = 0;
+      activeSub.graceNotifications = { day1: false, day2: false, day3: false };
+      activeSub.reminderFlags = { day7: false, day3: false, day1: false, day0: false };
+      await activeSub.save();
+
+      await User.findOneAndUpdate(
+        { telegramId: targetId },
+        { status: 'active', graceDaysRemaining: null, lastInteraction: new Date() }
+      );
+
+      const alreadyInGroup = await isGroupMember(bot, process.env.PREMIUM_GROUP_ID, targetId);
+      const extra = { parse_mode: 'Markdown' };
+      let userMsg =
+        `✅ *Your subscription plan has been updated by admin.*\n\n` +
+        `📋 New Plan: *${plan.name}*\n` +
+        `📅 Valid for: *${plan.durationDays} days*\n` +
+        `⏰ Expires on: *${formatDate(newExpiry)}*`;
+
+      if (!alreadyInGroup) {
+        const inviteLink = await generateInviteLink(bot, process.env.PREMIUM_GROUP_ID, targetId, newExpiry);
+        if (inviteLink) {
+          extra.reply_markup = {
+            inline_keyboard: [[{ text: '🔗 Join Premium Group', url: inviteLink, style: 'success' }]],
+          };
+          userMsg += `\n\nGroup join karne ke liye niche button par click karein.`;
+          await Subscription.findByIdAndUpdate(activeSub._id, {
+            inviteLink,
+            inviteLinkIssuedAt: new Date(),
+            inviteLinkTtlMinutes: Math.max(1, parseInt(process.env.INVITE_LINK_TTL_MINUTES || '10', 10)),
+          });
+        }
+      }
+
+      await safeSend(bot, targetId, userMsg, extra);
+
+      await AdminLog.create({
+        adminId: ctx.from.id,
+        actionType: 'edit_plan',
+        targetUserId: targetId,
+        details: {
+          reason: 'Correct wrong selected plan',
+          subscriptionId: activeSub._id,
+          previousPlan,
+          newPlan: plan.name,
+          newDurationDays: plan.durationDays,
+        },
+      });
+
+      await ctx.reply(
+        `✅ Plan updated for user \`${targetId}\`.\n*${previousPlan}* → *${plan.name}*\nNew expiry: *${formatDate(newExpiry)}*`,
+        { parse_mode: 'Markdown' }
+      );
+    } catch (err) {
+      logger.error(`modifyplan command error: ${err.message}`);
+      await ctx.reply('❌ Failed to modify plan. Please try again.');
+    }
+  });
+
+  // ── /invite <telegramId> — resend join link / reset pending request ──────
+  bot.command('invite', requireAdmin, async (ctx) => {
+    try {
+      const parts = String(ctx.message?.text || '').trim().split(/\s+/);
+      if (parts.length < 2) {
+        return ctx.reply('Usage: /invite <telegramId>');
+      }
+
+      const targetId = parseInt(parts[1], 10);
+      if (!targetId) {
+        return ctx.reply('❌ Invalid telegramId. Usage: /invite <telegramId>');
+      }
+
+      const targetUser = await User.findOne({ telegramId: targetId });
+      if (!targetUser) {
+        return ctx.reply(`❌ User \`${targetId}\` not found.`, { parse_mode: 'Markdown' });
+      }
+
+      // Nullify any previous pending request so user can raise a fresh one if needed.
+      const pendingResult = await Request.updateMany(
+        { telegramId: targetId, status: 'pending' },
+        { status: 'rejected', actionDate: new Date(), actionBy: ctx.from.id }
+      );
+
+      const activeSub = await Subscription.findOne({
+        telegramId: targetId,
+        status: { $in: ['active', 'grace'] },
+        expiryDate: { $gt: new Date() },
+      }).sort({ expiryDate: -1 });
+
+      if (!activeSub) {
+        await User.findOneAndUpdate(
+          { telegramId: targetId },
+          { status: 'inactive', graceDaysRemaining: null, lastInteraction: new Date() }
+        );
+
+        await safeSend(
+          bot,
+          targetId,
+          `ℹ️ *Please raise a new joining request.*\n\n` +
+          `Aapka pehle ka pending request reset kar diya gaya hai.\n` +
+          `Kripya /start karke *Premium Access Request* dubara bhejein.`,
+          { parse_mode: 'Markdown' }
+        );
+
+        await AdminLog.create({
+          adminId: ctx.from.id,
+          actionType: 'resend_invite',
+          targetUserId: targetId,
+          details: {
+            result: 'no_active_subscription',
+            nullifiedPendingRequests: pendingResult?.modifiedCount || 0,
+          },
+        });
+
+        return ctx.reply(
+          `✅ Pending request(s) reset for \`${targetId}\`.\nNo active subscription found, user asked to raise a new request.`,
+          { parse_mode: 'Markdown' }
+        );
+      }
+
+      const inviteLink = await generateInviteLink(bot, process.env.PREMIUM_GROUP_ID, targetId, activeSub.expiryDate);
+      if (!inviteLink) {
+        return ctx.reply('❌ Failed to generate a new invite link. Check bot group admin permissions.');
+      }
+
+      await Subscription.findByIdAndUpdate(activeSub._id, {
+        inviteLink,
+        inviteLinkIssuedAt: new Date(),
+        inviteLinkTtlMinutes: Math.max(1, parseInt(process.env.INVITE_LINK_TTL_MINUTES || '10', 10)),
+      });
+
+      await safeSend(
+        bot,
+        targetId,
+        `🔗 *New Invite Link Generated*\n\n` +
+        `Aapka naya joining link ready hai. Niche button pe click karke group join karein.\n\n` +
+        `⏰ Link limited-time aur single-use hai.`,
+        {
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [[{ text: '🔗 Join Premium Group', url: inviteLink, style: 'success' }]],
+          },
+        }
+      );
+
+      await AdminLog.create({
+        adminId: ctx.from.id,
+        actionType: 'resend_invite',
+        targetUserId: targetId,
+        details: {
+          subscriptionId: activeSub._id,
+          plan: activeSub.planName,
+          expiryDate: activeSub.expiryDate,
+          nullifiedPendingRequests: pendingResult?.modifiedCount || 0,
+        },
+      });
+
+      const now = new Date();
+      await logToChannel(
+        bot,
+        `✅ *New Invite Link issued:*\n` +
+        `For User Id: \`${targetId}\`\n` +
+        `By Admin Id: \`${ctx.from.id}\`\n` +
+        `Date: ${now.toLocaleDateString('en-GB')}\n` +
+        `Time: ${now.toLocaleTimeString('en-IN')}`
+      );
+
+      await ctx.reply(
+        `✅ New invite link sent to user \`${targetId}\`.\nPlan: *${activeSub.planName}*\nExpires: *${formatDate(activeSub.expiryDate)}*`,
+        { parse_mode: 'Markdown' }
+      );
+    } catch (err) {
+      logger.error(`invite command error: ${err.message}`);
+      await ctx.reply('❌ Failed to resend invite. Please try again.');
+    }
+  });
+
+  // ── /offeruser <id>|<discount> ────────────────────────────────────────────
+  bot.command('offeruser', requireAdmin, async (ctx) => {
+    try {
+      const raw = String(ctx.message?.text || '').replace('/offeruser', '').trim();
+      const [idPart, discountPart] = raw.split('|').map(s => s.trim());
+
+      if (!idPart || !discountPart) {
+        return ctx.reply(
+          'Usage: `/offeruser <telegramId>|<discountPercent>`',
+          { parse_mode: 'Markdown' }
+        );
+      }
+
+      const targetId = parseInt(idPart, 10);
+      if (!targetId) {
+        return ctx.reply('❌ Invalid telegramId.');
+      }
+
+      const targetUser = await User.findOne({ telegramId: targetId });
+      if (!targetUser) {
+        return ctx.reply(`❌ User \`${targetId}\` not found.`, { parse_mode: 'Markdown' });
+      }
+
+      const discount = parseInt(discountPart, 10);
+      if (Number.isNaN(discount) || discount < 0 || discount > 100) {
+        return ctx.reply('❌ discountPercent must be between 0 and 100.');
+      }
+
+      const validTill = new Date();
+      validTill.setHours(23, 59, 59, 999);
+
+      const defaultTitle = 'Special Discount';
+      const defaultDescription = 'Only for you!';
+
+      const offer = await UserOffer.create({
+        targetTelegramId: targetId,
+        title: defaultTitle,
+        description: defaultDescription,
+        discountPercent: discount,
+        validTill,
+        createdBy: ctx.from.id,
+      });
+
+      await AdminLog.create({
+        adminId: ctx.from.id,
+        actionType: 'create_offer',
+        targetUserId: targetId,
+        details: {
+          userOfferId: offer._id,
+          userSpecific: true,
+          title: offer.title,
+          discountPercent: offer.discountPercent,
+          validTill: offer.validTill,
+        },
+      });
+
+      await safeSend(
+        bot,
+        targetId,
+        `🎁 *Private Offer Received!*\n\n` +
+        `*Special Discount*\n` +
+        `Only for you!\n` +
+        `${offer.discountPercent > 0 ? `💰 Discount: *${offer.discountPercent}%*\n` : ''}` +
+        `⏰ Valid till: *Today only*\n\n` +
+        `Ye offer sirf aapke liye hai aur next request/renewal par ek hi baar apply hoga.`,
+        { parse_mode: 'Markdown' }
+      );
+
+      await ctx.reply(
+        `✅ One-time private offer created for \`${targetId}\`.\nOffer ID: \`${offer._id}\``,
+        { parse_mode: 'Markdown' }
+      );
+    } catch (err) {
+      logger.error(`offeruser command error: ${err.message}`);
+      await ctx.reply('❌ Failed to create private offer. Please check format and try again.');
+    }
+  });
+
+  // ── /ban <telegramId> — block user from using bot ─────────────────────────
+  bot.command('ban', requireAdmin, async (ctx) => {
+    try {
+      const parts = String(ctx.message?.text || '').trim().split(/\s+/);
+      if (parts.length < 2) {
+        return ctx.reply('Usage: /ban <telegramId>');
+      }
+
+      const targetId = parseInt(parts[1], 10);
+      if (!targetId) {
+        return ctx.reply('❌ Invalid telegramId. Usage: /ban <telegramId>');
+      }
+
+      if (targetId === ctx.from.id) {
+        return ctx.reply('❌ You cannot ban yourself.');
+      }
+
+      const targetUser = await User.findOne({ telegramId: targetId });
+      if (!targetUser) {
+        return ctx.reply(`❌ User \`${targetId}\` not found.`, { parse_mode: 'Markdown' });
+      }
+
+      if (['admin', 'superadmin'].includes(targetUser.role)) {
+        return ctx.reply('⛔ You cannot ban an admin/superadmin user.');
+      }
+
+      await User.findOneAndUpdate(
+        { telegramId: targetId },
+        { isBlocked: true, status: 'blocked', lastInteraction: new Date() }
+      );
+
+      if (process.env.PREMIUM_GROUP_ID) {
+        await banFromGroup(bot, process.env.PREMIUM_GROUP_ID, targetId);
+      }
+
+      await safeSend(
+        bot,
+        targetId,
+        `⛔ *You have been banned from using this bot.*\n\n` +
+        `Please contact support for this issue: ${process.env.SUPPORT_CONTACT || '@ImaxSupport1Bot'}`,
+        { parse_mode: 'Markdown' }
+      );
+
+      await AdminLog.create({
+        adminId: ctx.from.id,
+        actionType: 'ban_user',
+        targetUserId: targetId,
+        details: { reason: 'Manual ban via /ban command' },
+      });
+
+      await ctx.reply(`✅ User \`${targetId}\` has been banned from bot usage.`, { parse_mode: 'Markdown' });
+    } catch (err) {
+      logger.error(`ban command error: ${err.message}`);
+      await ctx.reply('❌ Failed to ban user. Please try again.');
+    }
+  });
+
+  // ── /unban <telegramId> — restore user bot access ────────────────────────
+  bot.command('unban', requireAdmin, async (ctx) => {
+    try {
+      const parts = String(ctx.message?.text || '').trim().split(/\s+/);
+      if (parts.length < 2) {
+        return ctx.reply('Usage: /unban <telegramId>');
+      }
+
+      const targetId = parseInt(parts[1], 10);
+      if (!targetId) {
+        return ctx.reply('❌ Invalid telegramId. Usage: /unban <telegramId>');
+      }
+
+      const targetUser = await User.findOne({ telegramId: targetId });
+      if (!targetUser) {
+        return ctx.reply(`❌ User \`${targetId}\` not found.`, { parse_mode: 'Markdown' });
+      }
+
+      await User.findOneAndUpdate(
+        { telegramId: targetId },
+        { isBlocked: false, status: 'active', lastInteraction: new Date() }
+      );
+
+      if (process.env.PREMIUM_GROUP_ID) {
+        await unbanFromGroup(bot, process.env.PREMIUM_GROUP_ID, targetId);
+      }
+
+      await safeSend(
+        bot,
+        targetId,
+        `✅ *Your access has been restored.*\n\nYou can now use the bot again.`,
+        { parse_mode: 'Markdown' }
+      );
+
+      await AdminLog.create({
+        adminId: ctx.from.id,
+        actionType: 'unban_user',
+        targetUserId: targetId,
+        details: { reason: 'Manual unban via /unban command' },
+      });
+
+      await ctx.reply(`✅ User \`${targetId}\` has been unbanned.`, { parse_mode: 'Markdown' });
+    } catch (err) {
+      logger.error(`unban command error: ${err.message}`);
+      await ctx.reply('❌ Failed to unban user. Please try again.');
+    }
+  });
+
+  // ── /expiries [today|0|1|3|7] — check upcoming expiries ──────────────────
+  bot.command('expiries', requireAdmin, async (ctx) => {
+    try {
+      const arg = (String(ctx.message?.text || '').trim().split(/\s+/)[1] || '').toLowerCase();
+
+      let checkpoints = [0, 1, 3, 7];
+      if (arg) {
+        if (arg === 'today') {
+          checkpoints = [0];
+        } else {
+          const days = parseInt(arg, 10);
+          if (![0, 1, 3, 7].includes(days)) {
+            return ctx.reply('Usage: `/expiries [today|0|1|3|7]`', { parse_mode: 'Markdown' });
+          }
+          checkpoints = [days];
+        }
+      }
+
+      let message = '⏰ *Expiry Check*\n\n';
+      const today = startOfToday();
+
+      for (const days of checkpoints) {
+        const targetStart = addDays(today, days);
+        const targetEnd = new Date(targetStart);
+        targetEnd.setHours(23, 59, 59, 999);
+
+        const subs = await Subscription.find({
+          status: 'active',
+          expiryDate: { $gte: targetStart, $lte: targetEnd },
+        }).sort({ expiryDate: 1 }).limit(50);
+
+        const label = days === 0 ? 'Today' : `In ${days} day${days > 1 ? 's' : ''}`;
+        message += `*${label}:* ${subs.length}\n`;
+
+        if (subs.length) {
+          subs.forEach((sub, index) => {
+            message += `${index + 1}. \`${sub.telegramId}\` — ${sub.planName} — ${formatDate(sub.expiryDate)}\n`;
+          });
+        }
+
+        message += '\n';
+      }
+
+      if (message.length > 3900) {
+        message = message.slice(0, 3900) + '\n...truncated';
+      }
+
+      await ctx.reply(message, { parse_mode: 'Markdown' });
+    } catch (err) {
+      logger.error(`expiries command error: ${err.message}`);
+      await ctx.reply('❌ Failed to fetch expiry list. Please try again.');
+    }
   });
 
   // ── /plans ─────────────────────────────────────────────────────────────────

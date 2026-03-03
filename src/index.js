@@ -13,6 +13,7 @@ const { registerUserHandlers } = require('./bot/handlers');
 const { registerAdminHandlers } = require('./bot/adminHandlers');
 const { registerSuperAdminHandlers } = require('./bot/superAdminHandlers');
 const { initCronJobs } = require('./services/cronService');
+const { revokeInviteLink } = require('./utils/telegramUtils');
 
 const parseSuperAdminIds = () => {
   return String(process.env.SUPER_ADMIN_IDS || process.env.SUPER_ADMIN_ID || '')
@@ -88,6 +89,50 @@ bot.catch((err, ctx) => {
   }
 });
 
+// Revoke invite link immediately after first successful join (single-use hardening)
+bot.on('chat_member', async (ctx, next) => {
+  try {
+    const update = ctx.update?.chat_member;
+    const oldStatus = update?.old_chat_member?.status;
+    const newStatus = update?.new_chat_member?.status;
+    const invite = update?.invite_link;
+    const joinedNow = ['member', 'administrator', 'creator'].includes(newStatus)
+      && ['left', 'kicked'].includes(oldStatus);
+
+    if (joinedNow && invite?.invite_link) {
+      const linkName = String(invite.name || '');
+      if (linkName.startsWith('User_')) {
+        await revokeInviteLink(bot, update.chat.id, invite.invite_link);
+      }
+    }
+  } catch (err) {
+    logger.warn(`chat_member invite revoke handler error: ${err.message}`);
+  }
+
+  return next();
+});
+
+// Global guard: blocked users cannot use the bot
+bot.use(async (ctx, next) => {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return next();
+
+  const User = require('./models/User');
+  const user = await User.findOne({ telegramId });
+  if (!user?.isBlocked) return next();
+
+  const supportContact = process.env.SUPPORT_CONTACT || '@ImaxSupport1Bot';
+  const blockedMsg = `⛔ *You have been banned from using this bot.*\n\nPlease contact support for this issue: ${supportContact}`;
+
+  if (ctx.callbackQuery) {
+    await ctx.answerCbQuery('You are banned. Contact support.', { show_alert: true }).catch(() => { });
+  }
+
+  if (ctx.reply) {
+    await ctx.reply(blockedMsg, { parse_mode: 'Markdown' }).catch(() => { });
+  }
+});
+
 // Register all handler layers
 registerUserHandlers(bot);
 registerAdminHandlers(bot);
@@ -103,13 +148,15 @@ bot.command('help', async (ctx) => {
   msg += `*User:*\n/start — Main menu\n/status — Subscription status\n/referral — Your referral link\n/seller — Seller program dashboard\n/sellerwithdraw — Request seller withdrawal\n/support — Open a support ticket\n/help — This message\n`;
 
   if (['admin', 'superadmin'].includes(role)) {
-    msg += `\n*Admin:*\n/user <id> — User search panel\n/plans — Active plans\n/tickets — Open support tickets\n`;
+    msg += `\n*Admin:*\n/user <id> — User search panel\n/ban <id> — Ban user from bot\n/unban <id> — Restore bot access\n/invite <id> — Send fresh join link / reset pending request\n/offeruser <id>|<discount> — One-time private offer (today only)\n/revokeplan <id> — Terminate subscription + remove from group\n/modifyplan <id>|<planIdOrDays> — Correct user plan\n/expiries [today|0|1|3|7] — Check upcoming expiry users\n/plans — Active plans\n/tickets — Open support tickets\n`;
   }
   if (role === 'superadmin') {
     msg += `\n*Super Admin:*\n/addadmin <id> /removeadmin <id> /admins\n` +
       `/createplan /editplan /deleteplan /pauseplan /listplans\n` +
+      `/legacyadd <planIdOrDays>|<DD/MM/YYYY>|<id1,id2,...> — Import old active members\n` +
       `/addoffer /deleteoffer /listoffers\n` +
       `/broadcast — Broadcast to users\n` +
+      `/report <Nd|Nm> — Custom CSV report (e.g. 7d, 28d, 1m)\n` +
       `/reports — Sales reports\n` +
       `/stats — Growth dashboard\n` +
       `/planstats — Plan performance\n` +

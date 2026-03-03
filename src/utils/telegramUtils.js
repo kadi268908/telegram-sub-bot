@@ -59,19 +59,49 @@ const handleBlockedUser = async (bot, telegramId) => {
 };
 
 /**
- * Generate a single-use invite link with no time expiration.
- * member_limit = 1 ensures link can only be used once.
+ * Generate a single-use invite link.
+ * - member_limit: 1
+ * - expire_date: short TTL (default 10 min) to reduce misuse window
+ * If maxValidTill is provided, link expiry won't exceed that date.
  */
-const generateInviteLink = async (bot, groupId, userId) => {
+const generateInviteLink = async (bot, groupId, userId, maxValidTill = null) => {
   try {
+    const ttlMinutes = Math.max(1, parseInt(process.env.INVITE_LINK_TTL_MINUTES || '10', 10));
+    const nowUnix = Math.floor(Date.now() / 1000);
+    const ttlExpiryUnix = nowUnix + (ttlMinutes * 60);
+
+    let expireDateUnix = ttlExpiryUnix;
+    if (maxValidTill) {
+      const maxValidUnix = Math.floor(new Date(maxValidTill).getTime() / 1000);
+      if (!Number.isNaN(maxValidUnix) && maxValidUnix > nowUnix) {
+        expireDateUnix = Math.min(ttlExpiryUnix, maxValidUnix);
+      }
+    }
+
     const invite = await bot.telegram.createChatInviteLink(groupId, {
       name: `User_${userId}`,
       member_limit: 1,
+      expire_date: expireDateUnix,
+      creates_join_request: false,
     });
     return invite.invite_link;
   } catch (err) {
     logger.error(`generateInviteLink error for user ${userId}: ${err.message}`);
     return null;
+  }
+};
+
+/**
+ * Revoke a specific invite link immediately.
+ */
+const revokeInviteLink = async (bot, groupId, inviteLink) => {
+  try {
+    if (!inviteLink) return false;
+    await bot.telegram.revokeChatInviteLink(groupId, inviteLink);
+    return true;
+  } catch (err) {
+    logger.warn(`Could not revoke invite link: ${err.message}`);
+    return false;
   }
 };
 
@@ -102,6 +132,20 @@ const banFromGroup = async (bot, groupId, telegramId) => {
 };
 
 /**
+ * Unban a user from the premium group
+ */
+const unbanFromGroup = async (bot, groupId, telegramId) => {
+  try {
+    await bot.telegram.unbanChatMember(groupId, telegramId, { only_if_banned: true });
+    logger.info(`User ${telegramId} unbanned from group ${groupId}`);
+    return true;
+  } catch (err) {
+    logger.warn(`Could not unban ${telegramId}: ${err.message}`);
+    return false;
+  }
+};
+
+/**
  * Renewal inline keyboard with plan buttons
  */
 const renewalKeyboard = (plans) => {
@@ -116,7 +160,9 @@ module.exports = {
   safeSend,
   handleBlockedUser,
   generateInviteLink,
+  revokeInviteLink,
   isGroupMember,
   banFromGroup,
+  unbanFromGroup,
   renewalKeyboard,
 };

@@ -4,6 +4,7 @@
 const User = require('../models/User');
 const Plan = require('../models/Plan');
 const Subscription = require('../models/Subscription');
+const Request = require('../models/Request');
 const AdminLog = require('../models/AdminLog');
 const {
   addAdmin, removeAdmin, createPlan, updatePlan, deletePlan,
@@ -236,6 +237,120 @@ const registerSuperAdminHandlers = (bot) => {
     }
   });
 
+  // ── /report <Nd|Nm> — custom CSV report (e.g. 1d, 7d, 28d, 1m) ─────────
+  bot.command('report', requireSuperAdmin, async (ctx) => {
+    try {
+      const token = (ctx.message.text.split(' ')[1] || '').trim().toLowerCase();
+      const parsed = parseReportDuration(token);
+      if (!parsed) {
+        return ctx.reply('Usage: `/report <Nd|Nm>`\nExamples: `/report 1d`, `/report 7d`, `/report 28d`, `/report 1m`', { parse_mode: 'Markdown' });
+      }
+
+      const { value, unit } = parsed;
+      const endDate = new Date();
+      const startDate = new Date(endDate);
+      if (unit === 'd') startDate.setDate(startDate.getDate() - value);
+      else startDate.setMonth(startDate.getMonth() - value);
+
+      const [
+        requestsReceived,
+        approvals,
+        rejections,
+        subsCreated,
+        renewals,
+        newUsers,
+        activeNow,
+        expiredNow,
+        blockedNow,
+        salesByPlan,
+        subscriptionRows,
+      ] = await Promise.all([
+        Request.countDocuments({ createdAt: { $gte: startDate, $lte: endDate } }),
+        Request.countDocuments({ status: 'approved', actionDate: { $gte: startDate, $lte: endDate } }),
+        Request.countDocuments({ status: 'rejected', actionDate: { $gte: startDate, $lte: endDate } }),
+        Subscription.countDocuments({ createdAt: { $gte: startDate, $lte: endDate } }),
+        Subscription.countDocuments({
+          createdAt: { $gte: startDate, $lte: endDate },
+          isRenewal: true,
+        }),
+        User.countDocuments({ createdAt: { $gte: startDate, $lte: endDate } }),
+        Subscription.countDocuments({ status: 'active', expiryDate: { $gt: endDate } }),
+        Subscription.countDocuments({ status: 'expired' }),
+        User.countDocuments({ isBlocked: true }),
+        getSalesReport(startDate, endDate),
+        Subscription.find({
+          createdAt: { $gte: startDate, $lte: endDate },
+        })
+          .select('telegramId planName startDate expiryDate approvedBy status')
+          .sort({ createdAt: -1 })
+          .lean(),
+      ]);
+
+      const label = `${value}${unit}`;
+      const generatedAt = new Date();
+      const rows = [
+        ['Section', 'Metric', 'Value'],
+        ['Meta', 'Range', label],
+        ['Meta', 'StartDate', startDate.toISOString()],
+        ['Meta', 'EndDate', endDate.toISOString()],
+        ['Meta', 'GeneratedAt', generatedAt.toISOString()],
+        ['Summary', 'RequestsReceived', requestsReceived],
+        ['Summary', 'Approvals', approvals],
+        ['Summary', 'Rejections', rejections],
+        ['Summary', 'SubscriptionsCreated', subsCreated],
+        ['Summary', 'Renewals', renewals],
+        ['Summary', 'NewUsers', newUsers],
+        ['Snapshot', 'ActiveSubscriptionsNow', activeNow],
+        ['Snapshot', 'ExpiredSubscriptionsNow', expiredNow],
+        ['Snapshot', 'BlockedUsersNow', blockedNow],
+      ];
+
+      rows.push([]);
+      rows.push(['PlanSales', 'PlanName', 'Count', 'Revenue']);
+      if (salesByPlan.length) {
+        salesByPlan.forEach((row) => {
+          rows.push(['PlanSales', row.planName, row.count, Number(row.totalRevenue || 0).toFixed(2)]);
+        });
+      } else {
+        rows.push(['PlanSales', 'NoData', 0, '0.00']);
+      }
+
+      rows.push([]);
+      rows.push(['UserSubscriptions', 'UserID', 'Plan', 'StartDate', 'ExpiryDate', 'ApprovedByAdminId', 'Status']);
+      if (subscriptionRows.length) {
+        subscriptionRows.forEach((sub) => {
+          rows.push([
+            'UserSubscriptions',
+            sub.telegramId,
+            sub.planName,
+            sub.startDate ? new Date(sub.startDate).toISOString() : '',
+            sub.expiryDate ? new Date(sub.expiryDate).toISOString() : '',
+            sub.approvedBy ?? '',
+            sub.status || '',
+          ]);
+        });
+      } else {
+        rows.push(['UserSubscriptions', 'NoData', '', '', '', '', '']);
+      }
+
+      const csv = rows.map(toCsvRow).join('\n');
+      const fileName = `report_${label}_${generatedAt.toISOString().slice(0, 10)}.csv`;
+
+      await ctx.replyWithDocument(
+        {
+          source: Buffer.from(csv, 'utf8'),
+          filename: fileName,
+        },
+        {
+          caption: `📄 CSV report generated for ${label}`,
+        }
+      );
+    } catch (err) {
+      logger.error(`custom report csv error: ${err.message}`);
+      await ctx.reply('❌ Failed to generate CSV report.');
+    }
+  });
+
   // ── /stats — growth dashboard ──────────────────────────────────────────────
   bot.command('stats', requireSuperAdmin, async (ctx) => {
     try {
@@ -456,6 +571,30 @@ const formatSalesReport = (title, data) => {
   });
   msg += `\n📊 Total: ${totalSubs} — ₹${totalRevenue.toFixed(2)}`;
   return msg;
+};
+
+const parseReportDuration = (token) => {
+  const match = String(token || '').match(/^(\d+)([dm])$/i);
+  if (!match) return null;
+
+  const value = parseInt(match[1], 10);
+  const unit = match[2].toLowerCase();
+  if (!value || value <= 0) return null;
+  if (unit === 'd' && value > 365) return null;
+  if (unit === 'm' && value > 24) return null;
+  return { value, unit };
+};
+
+const toCsvCell = (value) => {
+  const raw = value === null || typeof value === 'undefined' ? '' : String(value);
+  if (/[",\n]/.test(raw)) {
+    return `"${raw.replace(/"/g, '""')}"`;
+  }
+  return raw;
+};
+
+const toCsvRow = (columns) => {
+  return columns.map(toCsvCell).join(',');
 };
 
 module.exports = { registerSuperAdminHandlers };

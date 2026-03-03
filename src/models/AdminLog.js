@@ -29,6 +29,8 @@ const adminLogSchema = new mongoose.Schema({
       'support_reply',
       'close_ticket',
       'manual_expire',
+      'resend_invite',
+      'legacy_import',
       'referral_bonus',
       'seller_withdraw_request',
       'seller_withdraw_approve',
