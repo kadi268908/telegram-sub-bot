@@ -291,6 +291,12 @@ const registerUserHandlers = (bot) => {
   bot.use(async (ctx, next) => {
     if (ctx.chat?.type !== 'private') return next();
 
+    const sender = await User.findOne({ telegramId: ctx.from.id }).select('role').lean().catch(() => null);
+    const senderRole = String(sender?.role || 'user').toLowerCase();
+    const shouldProtectByDefault =
+      String(process.env.PROTECT_BOT_MESSAGES || 'true').toLowerCase() === 'true' &&
+      senderRole === 'user';
+
     const incomingUserMessageId = ctx.message?.message_id;
     let userMessageDeleted = false;
     const originalReply = ctx.reply.bind(ctx);
@@ -298,7 +304,9 @@ const registerUserHandlers = (bot) => {
     ctx.reply = async (text, extra) => {
       const safeExtra = {
         ...(extra || {}),
-        protect_content: typeof extra?.protect_content === 'undefined' ? true : extra.protect_content,
+        protect_content: typeof extra?.protect_content === 'undefined'
+          ? shouldProtectByDefault
+          : extra.protect_content,
       };
 
       const hasInlineButtons = Array.isArray(safeExtra?.reply_markup?.inline_keyboard)
