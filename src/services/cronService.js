@@ -17,7 +17,18 @@ const { buildDailySummary } = require('./analyticsService');
 const { safeSend, isGroupMember, banFromGroup, renewalKeyboard } = require('../utils/telegramUtils');
 const { SUPPORT_CONTACT } = require('./supportService');
 const { addDays, formatDate, startOfToday } = require('../utils/dateUtils');
+const { getGroupIdForCategory, normalizePlanCategory } = require('../utils/premiumGroups');
 const logger = require('../utils/logger');
+
+const getSubscriptionGroupId = (sub) => {
+  if (sub?.premiumGroupId) return String(sub.premiumGroupId);
+  return getGroupIdForCategory(sub?.planCategory || 'general');
+};
+
+const getRenewalPlansByCategory = async (category) => {
+  const normalizedCategory = normalizePlanCategory(category);
+  return Plan.find({ isActive: true, category: normalizedCategory }).sort({ durationDays: 1 });
+};
 
 // ── Helper: post to log channel ──────────────────────────────────────────────
 const logToChannel = async (bot, message) => {
@@ -35,7 +46,6 @@ const logToChannel = async (bot, message) => {
 // Sends reminders at 7, 3, 1 day before expiry and on expiry day
 const reminderScheduler = async (bot) => {
   logger.info('[CRON] Running reminderScheduler...');
-  const plans = await Plan.find({ isActive: true });
 
   const checkpoints = [
     { days: 7, flag: 'day7', label: '7 days' },
@@ -56,6 +66,7 @@ const reminderScheduler = async (bot) => {
     });
 
     for (const sub of subs) {
+      const plans = await getRenewalPlansByCategory(sub.planCategory || 'general');
       const sent = await safeSend(
         bot,
         sub.telegramId,
@@ -122,7 +133,10 @@ const gracePeriodHandler = async (bot) => {
 
     if (daysSinceExpiry >= GRACE_DAYS) {
       // Remove from group
-      await banFromGroup(bot, process.env.PREMIUM_GROUP_ID, sub.telegramId);
+      const groupId = getSubscriptionGroupId(sub);
+      if (groupId) {
+        await banFromGroup(bot, groupId, sub.telegramId);
+      }
 
       // Mark subscription fully expired
       sub.status = 'expired';
@@ -147,22 +161,24 @@ const gracePeriodHandler = async (bot) => {
       });
 
     } else if (daysSinceExpiry === GRACE_DAYS - 1 && !sub.graceNotifications.day2) {
+      const plans = await getRenewalPlansByCategory(sub.planCategory || 'general');
       await safeSend(bot, sub.telegramId,
         `🔴 *Final Warning!*\n\nYou will be removed from the Premium Group in *1 day* if you don't renew.\n\nRenew now to keep access!`,
         {
           parse_mode: 'Markdown',
-          reply_markup: renewalKeyboard(await Plan.find({ isActive: true })),
+          reply_markup: renewalKeyboard(plans),
         }
       );
       sub.graceNotifications.day2 = true;
       await sub.save();
 
     } else if (daysSinceExpiry === 1 && !sub.graceNotifications.day1) {
+      const plans = await getRenewalPlansByCategory(sub.planCategory || 'general');
       await safeSend(bot, sub.telegramId,
         `⚠️ *Grace Period Reminder*\n\nYour subscription has expired. You have ${GRACE_DAYS - 1} days left before removal.`,
         {
           parse_mode: 'Markdown',
-          reply_markup: renewalKeyboard(await Plan.find({ isActive: true })),
+          reply_markup: renewalKeyboard(plans),
         }
       );
       sub.graceNotifications.day1 = true;
@@ -226,7 +242,9 @@ const membershipMonitor = async (bot) => {
   });
 
   for (const sub of activeSubs) {
-    const inGroup = await isGroupMember(bot, process.env.PREMIUM_GROUP_ID, sub.telegramId);
+    const groupId = getSubscriptionGroupId(sub);
+    if (!groupId) continue;
+    const inGroup = await isGroupMember(bot, groupId, sub.telegramId);
     if (!inGroup) {
       await safeSend(bot, sub.telegramId,
         `⚠️ *Rejoining Required*\n\nYou have an active subscription but aren't in the premium group.\n\nPlease contact support to get rejoined:\n👉 ${SUPPORT_CONTACT}`,
@@ -241,11 +259,14 @@ const membershipMonitor = async (bot) => {
     .select('telegramId');
 
   for (const sub of expiredUsers) {
-    const inGroup = await isGroupMember(bot, process.env.PREMIUM_GROUP_ID, sub.telegramId);
+    const fullSub = await Subscription.findOne({ telegramId: sub.telegramId }).sort({ createdAt: -1 });
+    const groupId = getSubscriptionGroupId(fullSub);
+    if (!groupId) continue;
+    const inGroup = await isGroupMember(bot, groupId, sub.telegramId);
     if (inGroup) {
-      await banFromGroup(bot, process.env.PREMIUM_GROUP_ID, sub.telegramId);
+      await banFromGroup(bot, groupId, sub.telegramId);
       await logToChannel(bot,
-        `🚫 *Expired User Removed by Monitor*\nUser: \`${sub.telegramId}\``
+        `🚫 *Expired User Removed by Monitor*\nUser: \`${sub.telegramId}\`\nGroup: \`${groupId}\``
       );
     }
   }
@@ -305,7 +326,11 @@ const inviteLinkExpiryNotifier = async (bot) => {
     const expiresAt = new Date(sub.inviteLinkIssuedAt.getTime() + ttlMinutes * 60 * 1000);
     if (now <= expiresAt) continue;
 
-    const inGroup = await isGroupMember(bot, process.env.PREMIUM_GROUP_ID, sub.telegramId);
+    const fullSub = await Subscription.findById(sub._id);
+    const groupId = getSubscriptionGroupId(fullSub);
+    if (!groupId) continue;
+
+    const inGroup = await isGroupMember(bot, groupId, sub.telegramId);
     if (inGroup) {
       await Subscription.findByIdAndUpdate(sub._id, {
         inviteLink: null,

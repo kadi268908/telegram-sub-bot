@@ -7,13 +7,15 @@
 //   request_access, renew_request, view_offers, my_referral
 
 const { Markup } = require('telegraf');
+const fs = require('fs');
+const path = require('path');
 const User = require('../models/User');
 const Request = require('../models/Request');
 const Subscription = require('../models/Subscription');
 const Plan = require('../models/Plan');
 const UserOffer = require('../models/UserOffer');
 
-const { findOrCreateUser, getActiveSubscription, getPendingRequest } = require('../services/userService');
+const { findOrCreateUser } = require('../services/userService');
 const { getActiveOffers, getActivePlans } = require('../services/adminService');
 const {
   openTicket,
@@ -31,10 +33,37 @@ const {
 } = require('../services/referralService');
 const { safeSend, renewalKeyboard, isGroupMember } = require('../utils/telegramUtils');
 const { formatDate, daysRemaining } = require('../utils/dateUtils');
+const { getGroupIdForCategory } = require('../utils/premiumGroups');
 const logger = require('../utils/logger');
 
 const REJOINING_PENALTY = process.env.REJOINING_PENALTY || '20';
 const lastBotMessageByChat = new Map();
+
+const PLAN_CATEGORY = {
+  MOVIE: 'movie',
+  DESI: 'desi',
+  NON_DESI: 'non_desi',
+  GENERAL: 'general',
+};
+
+const PLAN_CATEGORY_LABELS = {
+  [PLAN_CATEGORY.MOVIE]: 'Movie Premium',
+  [PLAN_CATEGORY.DESI]: 'Desi Premium',
+  [PLAN_CATEGORY.NON_DESI]: 'Non Desi Premium',
+  [PLAN_CATEGORY.GENERAL]: 'General Premium',
+};
+
+const PLAN_CATEGORY_BUTTON_LABELS = {
+  [PLAN_CATEGORY.MOVIE]: 'Movie Plan',
+  [PLAN_CATEGORY.DESI]: 'Desi Po*n Plan',
+  [PLAN_CATEGORY.NON_DESI]: 'Non-Desi Po*n Plan',
+};
+
+const QR_ASSET_BY_CATEGORY = {
+  [PLAN_CATEGORY.MOVIE]: 'qr-code.jpg',
+  [PLAN_CATEGORY.DESI]: 'qr-code.jpg',
+  [PLAN_CATEGORY.NON_DESI]: 'qr-code.jpg',
+};
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -48,6 +77,47 @@ const escapeMarkdown = (value) => {
   return String(value ?? '').replace(/([_*`\[])/g, '\\$1');
 };
 
+const normalizePlanCategory = (value) => {
+  const normalized = String(value || PLAN_CATEGORY.GENERAL).toLowerCase().replace(/[-\s]/g, '_');
+  if ([PLAN_CATEGORY.MOVIE, PLAN_CATEGORY.DESI, PLAN_CATEGORY.NON_DESI, PLAN_CATEGORY.GENERAL].includes(normalized)) {
+    return normalized;
+  }
+  return PLAN_CATEGORY.GENERAL;
+};
+
+const getPlanCategoryLabel = (category) => {
+  return PLAN_CATEGORY_LABELS[normalizePlanCategory(category)] || PLAN_CATEGORY_LABELS[PLAN_CATEGORY.GENERAL];
+};
+
+const formatInr = (value) => {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number)) return '0';
+  const rounded = Math.round(number * 100) / 100;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2);
+};
+
+const getBestPublicOffer = async () => {
+  const offers = await getActiveOffers();
+  if (!offers?.length) return null;
+
+  const validOffers = offers
+    .filter((offer) => Number(offer.discountPercent) > 0)
+    .sort((left, right) => Number(right.discountPercent || 0) - Number(left.discountPercent || 0));
+
+  return validOffers[0] || null;
+};
+
+const getDiscountedPrice = (price, discountPercent) => {
+  const base = Number(price || 0);
+  const discount = Number(discountPercent || 0);
+  if (!base || discount <= 0) return base;
+  return Math.ceil(Math.max(0, base - (base * discount / 100)));
+};
+
+const strikeText = (value) => {
+  return String(value || '').split('').map((ch) => `${ch}\u0336`).join('');
+};
+
 const isMessageNotModifiedError = (err) => {
   const message = err?.response?.description || err?.description || err?.message || '';
   return String(message).toLowerCase().includes('message is not modified');
@@ -57,7 +127,20 @@ const safeEditMessage = async (ctx, text, extra = {}) => {
   try {
     await ctx.editMessageText(text, extra);
   } catch (err) {
-    if (!isMessageNotModifiedError(err)) throw err;
+    if (isMessageNotModifiedError(err)) return;
+
+    const message = String(err?.response?.description || err?.description || err?.message || '').toLowerCase();
+    const needsCaptionEdit =
+      message.includes('there is no text in the message to edit') ||
+      message.includes('message text is empty');
+
+    if (!needsCaptionEdit) throw err;
+
+    try {
+      await ctx.editMessageCaption(text, extra);
+    } catch (captionErr) {
+      if (!isMessageNotModifiedError(captionErr)) throw captionErr;
+    }
   }
 };
 
@@ -173,8 +256,9 @@ const consumeOneTimeUserOffer = async (telegramId, requestId) => {
  * Build the approval keyboard for log channel requests.
  * Uses real plans from DB if any exist; falls back to hardcoded day options.
  */
-const buildApprovalKeyboard = async (requestId) => {
-  const plans = await Plan.find({ isActive: true }).sort({ durationDays: 1 });
+const buildApprovalKeyboard = async (requestId, requestCategory = PLAN_CATEGORY.GENERAL) => {
+  const normalizedCategory = normalizePlanCategory(requestCategory);
+  const plans = await Plan.find({ isActive: true, category: normalizedCategory }).sort({ durationDays: 1 });
 
   let planButtons;
   if (plans.length > 0) {
@@ -189,12 +273,7 @@ const buildApprovalKeyboard = async (requestId) => {
     }
     planButtons = rows;
   } else {
-    planButtons = [[
-      withStyle({ text: '30 Days', callback_data: `approve_${requestId}_30` }, 'success'),
-      withStyle({ text: '90 Days', callback_data: `approve_${requestId}_90` }, 'success'),
-      withStyle({ text: '180 Days', callback_data: `approve_${requestId}_180` }, 'success'),
-      withStyle({ text: '365 Days', callback_data: `approve_${requestId}_365` }, 'success'),
-    ]];
+    planButtons = [];
   }
 
   return {
@@ -221,6 +300,16 @@ const registerUserHandlers = (bot) => {
         ...(extra || {}),
         protect_content: typeof extra?.protect_content === 'undefined' ? true : extra.protect_content,
       };
+
+      const hasInlineButtons = Array.isArray(safeExtra?.reply_markup?.inline_keyboard)
+        && safeExtra.reply_markup.inline_keyboard.length > 0;
+
+      if (!hasInlineButtons) {
+        safeExtra.reply_markup = {
+          inline_keyboard: [[withStyle(Markup.button.callback('🏠 Main Menu', 'back_to_main'), 'primary')]],
+        };
+      }
+
       const sent = await originalReply(text, safeExtra);
 
       if (incomingUserMessageId && !userMessageDeleted) {
@@ -234,6 +323,249 @@ const registerUserHandlers = (bot) => {
 
     return next();
   });
+
+  const mainMenuKeyboard = () => Markup.inlineKeyboard([
+    [withStyle(Markup.button.callback('📋 Check Plans', 'check_plans'), 'success')],
+    [withStyle(Markup.button.callback('✅ Already Paid for premium', 'already_paid_menu'), 'success')],
+    [withStyle(Markup.button.callback('📱 More Menu', 'more_menu'), 'primary')],
+  ]);
+
+  const checkPlansKeyboard = () => Markup.inlineKeyboard([
+    [withStyle(Markup.button.callback('🎬 Movie Plan', 'plan_menu_movie'), 'primary')],
+    [withStyle(Markup.button.callback('🔥 Desi Po*n Plan', 'plan_menu_desi'), 'primary')],
+    [withStyle(Markup.button.callback('🌍 Non-Desi Po*n Plan', 'plan_menu_non_desi'), 'primary')],
+    [withStyle(Markup.button.callback('⬅️ Back Button', 'back_to_main'), 'success')],
+  ]);
+
+  const moreMenuKeyboard = () => Markup.inlineKeyboard([
+    [withStyle(Markup.button.callback('📊 Check Subscription Status', 'check_status'), 'primary')],
+    [withStyle(Markup.button.callback('🎁 View Current Offers', 'view_offers'), 'primary')],
+    [withStyle(Markup.button.callback('🔗 My referal link', 'my_referral'), 'primary')],
+    [withStyle(Markup.button.callback('🛍 Seller Program', 'seller_program'), 'primary')],
+    [Markup.button.callback('🎫 Contact Support', 'open_support')],
+    [withStyle(Markup.button.callback('⬅️ Back button', 'back_to_main'), 'success')],
+  ]);
+
+  const premiumSelectionKeyboard = () => Markup.inlineKeyboard([
+    [withStyle(Markup.button.callback('🎬 Movie Premium', 'request_premium_movie'), 'success')],
+    [withStyle(Markup.button.callback('🔥 Desi Premium', 'request_premium_desi'), 'success')],
+    [withStyle(Markup.button.callback('🌍 Non Desi Premium', 'request_premium_non_desi'), 'success')],
+    [Markup.button.callback('🎫 Support Chat', 'open_support')],
+  ]);
+
+  const renewCategoryKeyboard = (categories) => {
+    const rows = [];
+    if (categories.includes(PLAN_CATEGORY.MOVIE)) {
+      rows.push([withStyle(Markup.button.callback('🔄 Renew Movie Premium', 'status_renew_movie'), 'success')]);
+    }
+    if (categories.includes(PLAN_CATEGORY.DESI)) {
+      rows.push([withStyle(Markup.button.callback('🔄 Renew Desi Premium', 'status_renew_desi'), 'success')]);
+    }
+    if (categories.includes(PLAN_CATEGORY.NON_DESI)) {
+      rows.push([withStyle(Markup.button.callback('🔄 Renew Non Desi Premium', 'status_renew_non_desi'), 'success')]);
+    }
+    rows.push([withStyle(Markup.button.callback('🏠 Main Menu', 'back_to_main'), 'primary')]);
+    return Markup.inlineKeyboard(rows);
+  };
+
+  const getCategoryPlans = async (category) => {
+    const normalizedCategory = normalizePlanCategory(category);
+    return Plan.find({
+      isActive: true,
+      category: normalizedCategory,
+    }).sort({ durationDays: 1 });
+  };
+
+  const buildCategoryPlansText = async (category) => {
+    const plans = await getCategoryPlans(category);
+    const title = PLAN_CATEGORY_BUTTON_LABELS[normalizePlanCategory(category)] || getPlanCategoryLabel(category);
+    const bestOffer = await getBestPublicOffer();
+
+    if (!plans.length) {
+      return `📋 ${title}\n\nNo active plans found for this category right now.\nPlease contact support from More Menu.`;
+    }
+
+    let text = `📋 ${title}\n\n`;
+    plans.forEach((plan, index) => {
+      text += `${index + 1}. ${plan.name} — ${plan.durationDays} days`;
+      if (plan.price) {
+        if (bestOffer?.discountPercent > 0) {
+          const discounted = getDiscountedPrice(plan.price, bestOffer.discountPercent);
+          text += ` — ${strikeText(`₹${formatInr(plan.price)}`)} ₹${formatInr(discounted)} (${bestOffer.discountPercent}% OFF)`;
+        } else {
+          text += ` — ₹${formatInr(plan.price)}`;
+        }
+      }
+      text += `\n`;
+    });
+
+    if (bestOffer?.discountPercent > 0) {
+      text += `\n🎁 Offer Applied: ${bestOffer.discountPercent}% OFF (${bestOffer.title})\n`;
+    }
+
+    text += `\n✅ Payment karne ke baad niche Paid button pe click karein.`;
+    return text;
+  };
+
+  const sendMainMenuMessage = async (ctx, userName = 'User') => {
+    await ctx.reply(
+      `👋 *Welcome, ${escapeMarkdown(userName)}!*\n\n` +
+      `Premium lene ke liye pehle *Check Plans* pe tap karein.\n\n` +
+      `Agr aapne pehle se payment kar diya hai, toh "*Already Paid for premium*" pe tap karke apna payment proof submit karein.\n\n`,
+      {
+        parse_mode: 'Markdown',
+        ...mainMenuKeyboard(),
+      }
+    );
+  };
+
+  const submitPremiumRequest = async (ctx, category) => {
+    const normalizedCategory = normalizePlanCategory(category);
+    const categoryLabel = getPlanCategoryLabel(normalizedCategory);
+
+    const user = await findOrCreateUser(ctx.from);
+    await User.findByIdAndUpdate(user._id, { lastInteraction: new Date() });
+
+    const sameCategoryActiveSub = await Subscription.findOne({
+      telegramId: ctx.from.id,
+      status: 'active',
+      expiryDate: { $gt: new Date() },
+      planCategory: normalizedCategory,
+    });
+
+    if (sameCategoryActiveSub) {
+      await ctx.reply(
+        `✅ *Aapka ${escapeMarkdown(categoryLabel)} subscription active hai!*\n\n` +
+        `📋 Plan: *${sameCategoryActiveSub.planName}*\n` +
+        `📅 Expires: *${formatDate(sameCategoryActiveSub.expiryDate)}*`,
+        { parse_mode: 'Markdown' }
+      );
+      return;
+    }
+
+    const sameCategoryPendingReq = await Request.findOne({
+      telegramId: ctx.from.id,
+      status: 'pending',
+      requestCategory: normalizedCategory,
+    });
+
+    if (sameCategoryPendingReq) {
+      await ctx.reply(
+        `⏳ *${escapeMarkdown(categoryLabel)} request already submitted*\n\n` +
+        `Admin aapki request verify kar rahe hain. Thoda wait karein.`,
+        { parse_mode: 'Markdown' }
+      );
+      return;
+    }
+
+    const userDoc = await User.findOne({ telegramId: ctx.from.id });
+    const latestProof = userDoc?.meta?.latestPaymentProof;
+    const proofReadyForCategory = normalizePlanCategory(userDoc?.meta?.paymentProofReadyForCategory);
+    const bestPublicOffer = await getBestPublicOffer();
+    if (!latestProof?.fileId) {
+      await ctx.reply(
+        `⚠️ Payment screenshot required.\n\n` +
+        `Pehle *Check Plans* → plan select karein → *Paid* dabayein aur screenshot upload karein.`,
+        { parse_mode: 'Markdown' }
+      );
+      return;
+    }
+
+    if (proofReadyForCategory !== normalizedCategory) {
+      await ctx.reply(
+        `⚠️ Fresh payment screenshot required.\n\n` +
+        `Pehle *Check Plans* → *${escapeMarkdown(getPlanCategoryLabel(normalizedCategory))}* select karein → *Paid* dabayein aur naya screenshot upload karein.`,
+        { parse_mode: 'Markdown' }
+      );
+      return;
+    }
+
+    if (normalizePlanCategory(latestProof.category) !== normalizedCategory) {
+      await ctx.reply(
+        `⚠️ Aapne alag category ka screenshot upload kiya hai.\n\n` +
+        `Kripya *${escapeMarkdown(getPlanCategoryLabel(normalizedCategory))}* ke liye naya screenshot upload karein.`,
+        { parse_mode: 'Markdown' }
+      );
+      return;
+    }
+
+    const newRequest = await Request.create({
+      userId: user._id,
+      telegramId: ctx.from.id,
+      status: 'pending',
+      requestCategory: normalizedCategory,
+      paymentProof: {
+        fileId: latestProof.fileId,
+        fileUniqueId: latestProof.fileUniqueId || null,
+        sourceType: latestProof.sourceType || null,
+        logMessageId: latestProof.logMessageId || null,
+      },
+    });
+
+    const consumedOffer = await consumeOneTimeUserOffer(ctx.from.id, newRequest._id);
+    if (consumedOffer) {
+      await Request.findByIdAndUpdate(newRequest._id, {
+        appliedUserOffer: {
+          offerId: consumedOffer._id,
+          title: consumedOffer.title,
+          discountPercent: consumedOffer.discountPercent,
+        },
+      });
+    }
+
+    await User.findByIdAndUpdate(user._id, {
+      status: 'pending',
+      $set: { 'meta.awaitingPaymentScreenshot': false },
+      $unset: {
+        'meta.latestPaymentProof': '',
+        'meta.paymentProofReadyForCategory': '',
+        'meta.paymentCategory': '',
+      },
+    });
+
+    await ctx.reply(
+      `✅ *${escapeMarkdown(categoryLabel)} request submitted!*\n\n` +
+      (latestProof?.fileId && bestPublicOffer?.discountPercent > 0
+        ? `🎁 *Public offer applied:* ${escapeMarkdown(bestPublicOffer.title)} (${bestPublicOffer.discountPercent}% OFF)\n`
+        : '') +
+      (latestProof?.fileId && bestPublicOffer?.discountPercent > 0 ? `\n` : '') +
+      `Admin aapki payment verify karke jaldi approval denge.\n\n` +
+      (consumedOffer
+        ? `🎁 *Private offer applied:* ${escapeMarkdown(consumedOffer.title)}${consumedOffer.discountPercent > 0 ? ` (*${consumedOffer.discountPercent}% OFF*)` : ''}\n\n`
+        : '') +
+      `⏱ Usually 20 minutes ke andar approval mil jata hai.`,
+      { parse_mode: 'Markdown' }
+    );
+
+    const keyboard = await buildApprovalKeyboard(newRequest._id, normalizedCategory);
+    const safeName = escapeMarkdown(user.name);
+    const safeUsername = user.username ? `@${escapeMarkdown(user.username)}` : 'N/A';
+    const referredByUser = user.referredBy || null;
+    const referredBySeller = user.sellerReferredBy || null;
+
+    const logMsg = await bot.telegram.sendMessage(
+      process.env.LOG_CHANNEL_ID,
+      `🆕 *New Premium Access Request*\n\n` +
+      `📦 Category: *${escapeMarkdown(categoryLabel)}*\n` +
+      `👤 Name: ${safeName}\n` +
+      `🆔 User ID: \`${ctx.from.id}\`\n` +
+      `📛 Username: ${safeUsername}\n` +
+      `🤝 Referred By (User): \`${referredByUser || 'N/A'}\`\n` +
+      `🛍 Referred By (Seller): \`${referredBySeller || 'N/A'}\`\n` +
+      (bestPublicOffer?.discountPercent > 0
+        ? `🎁 Public Offer: *${escapeMarkdown(bestPublicOffer.title)}* (${bestPublicOffer.discountPercent}% OFF)\n`
+        : '') +
+      (consumedOffer
+        ? `🎁 Private Offer: *${escapeMarkdown(consumedOffer.title)}*${consumedOffer.discountPercent > 0 ? ` (*${consumedOffer.discountPercent}% OFF*)` : ''}\n`
+        : '') +
+      `🧾 Payment Proof Log Msg: \`${latestProof.logMessageId || 'N/A'}\`\n` +
+      `🕒 Time: ${new Date().toLocaleString('en-IN')}`,
+      { parse_mode: 'Markdown', reply_markup: keyboard }
+    );
+
+    await Request.findByIdAndUpdate(newRequest._id, { logMessageId: logMsg.message_id });
+    logger.info(`New ${normalizedCategory} access request for user ${ctx.from.id}`);
+  };
 
   // ── /start ─────────────────────────────────────────────────────────────────
   bot.start(async (ctx) => {
@@ -249,46 +581,188 @@ const registerUserHandlers = (bot) => {
         await processReferral(user, payload.replace('ref_', ''));
       }
 
-      const isNew = new Date() - user.createdAt < 10000;
-
-      await ctx.reply(
-        `${isNew ? '👋 Welcome' : '👋 Welcome back'}, *${user.name}*!\n\n` +
-        `*AK Imax Premium Manager BOT me aapka swaagat hai!*\n\n` +
-        `Aapne Premium Ke Liye Pay Kar Diya Hai To Niche Diye Gaye Button Pe Click Kro.\n\n` +
-        `*🚨 Note: Bina payment ke request karne par admin aapko* _BAN_ *kar shakte hain, isliye bina payment ke request na karein.*\n\n`,
-        {
-          parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([
-            [withStyle(Markup.button.callback('🌟 Premium Access Request', 'request_access'), 'success')],
-            [withStyle(Markup.button.callback('📋 More Menu', 'more_menu'), 'primary')],
-          ]),
-        }
-      );
+      await sendMainMenuMessage(ctx, user.name);
     } catch (err) {
       logger.error(`/start error: ${err.message}`);
       await ctx.reply('❌ Something went wrong. Please try again.');
     }
   });
 
+  bot.action('check_plans', async (ctx) => {
+    await ctx.answerCbQuery();
+
+    const baseKeyboard = checkPlansKeyboard().reply_markup?.inline_keyboard || [];
+    const backRow = baseKeyboard.length ? [baseKeyboard[baseKeyboard.length - 1]] : [];
+    const planRows = baseKeyboard.length ? baseKeyboard.slice(0, -1) : [];
+    const keyboardWithSupport = Markup.inlineKeyboard([
+      ...planRows,
+      [withStyle(Markup.button.callback('🎫 Support Chat', 'open_support'), 'primary')],
+      ...backRow,
+    ]);
+
+    await safeEditMessage(
+      ctx,
+      `📋 *Check Plans*\n\nApni pasand ka plan choose karein.\n\n` +
+      `Plan se related koi issue ho to support se contact karein.`,
+      {
+        parse_mode: 'Markdown',
+        ...keyboardWithSupport,
+      }
+    );
+  });
+
   // ── More Menu ───────────────────────────────────────────────────────────────
   bot.action('more_menu', async (ctx) => {
     await ctx.answerCbQuery();
-    const keyboard = Markup.inlineKeyboard([
-      [withStyle(Markup.button.callback('📊 Check Subscription Status', 'check_status'), 'primary')],
-      [withStyle(Markup.button.callback('🎁 View Current Offers', 'view_offers'), 'primary')],
-      [withStyle(Markup.button.callback('🤝 My Referral Link', 'my_referral'), 'primary')],
-      [withStyle(Markup.button.callback('🛍 Seller Program', 'seller_program'), 'primary')],
-      [Markup.button.callback('🎫 Contact Support', 'open_support')],
-      [withStyle(Markup.button.callback('⬅️ Back', 'back_to_main'), 'success')],
-    ]);
     await safeEditMessage(
       ctx,
       `📋 *More Menu*\n\nNiche diye gaye options me se koi bhi choose karein.`,
       {
         parse_mode: 'Markdown',
-        ...keyboard,
+        ...moreMenuKeyboard(),
       }
     );
+  });
+
+  bot.action('already_paid_menu', async (ctx) => {
+    await ctx.answerCbQuery();
+    const premiumKeyboard = premiumSelectionKeyboard().reply_markup?.inline_keyboard || [];
+    await safeEditMessage(
+      ctx,
+      `✅ *Already Paid for premium*\n\n` +
+      `Jis category ke liye payment kiya hai us category ka button dabayein aur payment screenshot upload karein.`,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          ...premiumKeyboard,
+          [withStyle(Markup.button.callback('⬅️ Back', 'back_to_main'), 'success')],
+        ]),
+      }
+    );
+  });
+
+  bot.action(/^plan_menu_(movie|desi|non_desi)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    try {
+      const category = normalizePlanCategory(ctx.match[1]);
+      const plansText = await buildCategoryPlansText(category);
+      const activeCategorySub = await Subscription.findOne({
+        telegramId: ctx.from.id,
+        status: 'active',
+        expiryDate: { $gt: new Date() },
+        planCategory: category,
+      });
+      const plansMessage = activeCategorySub
+        ? `${plansText}\n\n✅ You already have an active ${getPlanCategoryLabel(category)} subscription.\nIf you want to extend it, click *Renew*.`
+        : plansText;
+      const qrFileName = QR_ASSET_BY_CATEGORY[category];
+      const qrPath = path.join(process.cwd(), 'assets', qrFileName);
+      const paidRows = [];
+      if (activeCategorySub) {
+        paidRows.push([withStyle(Markup.button.callback(`🔄 Renew ${getPlanCategoryLabel(category)}`, `status_renew_${category}`), 'success')]);
+      }
+      paidRows.push([withStyle(Markup.button.callback('✅ Paid', `paid_${category}`), 'success')]);
+      paidRows.push([withStyle(Markup.button.callback('🏠 Main Menu', 'back_to_main'), 'primary')]);
+      const paidKeyboard = Markup.inlineKeyboard(paidRows);
+
+      if (fs.existsSync(qrPath)) {
+        await ctx.replyWithPhoto(
+          { source: qrPath },
+          {
+            caption: plansMessage,
+            ...paidKeyboard,
+          }
+        );
+      } else {
+        await ctx.reply(
+          `${plansMessage}\n\n⚠️ QR image missing: ${qrFileName} (assets folder).`,
+          {
+            ...paidKeyboard,
+          }
+        );
+      }
+    } catch (err) {
+      logger.error(`plan_menu error: ${err.message}`);
+      await ctx.reply('❌ Plan fetch failed. Please try again.');
+    }
+  });
+
+  bot.action(/^paid_(movie|desi|non_desi)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    try {
+      const callbackMessageId = ctx.callbackQuery?.message?.message_id;
+      const callbackChatId = ctx.callbackQuery?.message?.chat?.id;
+      const category = normalizePlanCategory(ctx.match[1]);
+      await User.findOneAndUpdate(
+        { telegramId: ctx.from.id },
+        {
+          $set: {
+            'meta.awaitingPaymentScreenshot': true,
+            'meta.paymentCategory': category,
+            'meta.paymentFlowType': 'new_request',
+          },
+          $unset: {
+            'meta.paymentProofReadyForCategory': '',
+            'meta.renewalPlanId': '',
+          },
+        },
+        { upsert: false }
+      );
+
+      await ctx.reply(
+        `📸 *Payment screenshot upload karein*\n\n` +
+        `Aapne *${escapeMarkdown(getPlanCategoryLabel(category))}* select kiya hai.\n` +
+        `Ab payment screenshot photo/document bhejiye.` +
+        `🚫 Agar aapne fake screenshot upload kiya to aap hamesha k liye ban ho jaogye.\n\n`,
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [withStyle(Markup.button.callback('❌ Cancel Upload', 'cancel_payment_upload'), 'danger')],
+            [withStyle(Markup.button.callback('🏠 Main Menu', 'back_to_main'), 'primary')],
+          ]),
+        }
+      );
+
+      if (callbackChatId && callbackMessageId) {
+        await ctx.telegram.deleteMessage(callbackChatId, callbackMessageId).catch(() => { });
+      }
+    } catch (err) {
+      logger.error(`paid action error: ${err.message}`);
+      await ctx.reply('❌ Unable to process. Please try again.');
+    }
+  });
+
+  bot.action('cancel_payment_upload', async (ctx) => {
+    await ctx.answerCbQuery('Upload cancelled');
+    try {
+      await User.findOneAndUpdate(
+        { telegramId: ctx.from.id },
+        {
+          $set: { 'meta.awaitingPaymentScreenshot': false },
+          $unset: {
+            'meta.paymentCategory': '',
+            'meta.paymentProofReadyForCategory': '',
+            'meta.paymentFlowType': '',
+            'meta.renewalPlanId': '',
+          },
+        }
+      );
+
+      await ctx.reply(
+        `✅ Screenshot upload mode cancelled.\n\n` +
+        `Aap dubara plan choose karke continue kar sakte hain.`,
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [withStyle(Markup.button.callback('📋 Check Plans', 'check_plans'), 'success')],
+            [withStyle(Markup.button.callback('🏠 Main Menu', 'back_to_main'), 'primary')],
+          ]),
+        }
+      );
+    } catch (err) {
+      logger.error(`cancel_payment_upload error: ${err.message}`);
+      await ctx.reply('❌ Unable to cancel upload mode right now. Please try again.');
+    }
   });
 
   // ── Seller Program ───────────────────────────────────────────────────────
@@ -357,102 +831,27 @@ const registerUserHandlers = (bot) => {
   // ── Back to main menu (same message) ────────────────────────────────────────
   bot.action('back_to_main', async (ctx) => {
     await ctx.answerCbQuery();
-    const keyboard = Markup.inlineKeyboard([
-      [withStyle(Markup.button.callback('🌟 Premium Access Request', 'request_access'), 'success')],
-      [withStyle(Markup.button.callback('📋 More Menu', 'more_menu'), 'primary')],
-    ]);
-    await safeEditMessage(
-      ctx,
-      `👋 *Welcome!*\n\nYe apka *Premium Manager* bot hai.\n\nPremium ke liye payment ho gaya ho to niche diye gaye button par click karein:`,
-      {
-        parse_mode: 'Markdown',
-        ...keyboard,
-      }
-    );
+    const callbackMessageId = ctx.callbackQuery?.message?.message_id;
+    const callbackChatId = ctx.callbackQuery?.message?.chat?.id;
+
+    await sendMainMenuMessage(ctx, ctx.from?.first_name || 'User');
+
+    if (callbackChatId && callbackMessageId) {
+      await ctx.telegram.deleteMessage(callbackChatId, callbackMessageId).catch(() => { });
+    }
   });
 
-  // ── Request Premium Access ─────────────────────────────────────────────────
+  // ── Premium access callbacks ───────────────────────────────────────────────
   bot.action('request_access', async (ctx) => {
     await ctx.answerCbQuery();
     try {
-      const user = await findOrCreateUser(ctx.from);
-      await User.findByIdAndUpdate(user._id, { lastInteraction: new Date() });
-
-      const activeSub = await getActiveSubscription(ctx.from.id);
-      if (activeSub) {
-        return ctx.reply(
-          `✅ *Aapka subscription active hai!*\n\n` +
-          `📋 Plan: *${activeSub.planName}*\n` +
-          `📅 Expires: *${formatDate(activeSub.expiryDate)}*`,
-          { parse_mode: 'Markdown' }
-        );
-      }
-
-      const pendingReq = await getPendingRequest(ctx.from.id);
-      if (pendingReq) {
-        return ctx.reply(
-          `⏳ *Request Already Submitted*\n\n` +
-          `Admin aapki request verify kar rahe hain.\n` +
-          `Verification ke baad aapko jaldi se joining link mil jayega.\n\n` +
-          `⏱  Usually 20 minutes ke andar approval mil jata hai. Thoda wait karein please.`,
-          { parse_mode: 'Markdown' }
-        );
-      }
-
-      const newRequest = await Request.create({
-        userId: user._id,
-        telegramId: ctx.from.id,
-        status: 'pending',
-      });
-
-      const consumedOffer = await consumeOneTimeUserOffer(ctx.from.id, newRequest._id);
-      if (consumedOffer) {
-        await Request.findByIdAndUpdate(newRequest._id, {
-          appliedUserOffer: {
-            offerId: consumedOffer._id,
-            title: consumedOffer.title,
-            discountPercent: consumedOffer.discountPercent,
-          },
-        });
-      }
-
-      await User.findByIdAndUpdate(user._id, { status: 'pending' });
-
-      await ctx.reply(
-        `✅ _Premium joining request successfully!_\n\n` +
-        `Admin aapki payment verify kar rahe hain.\n\n` +
-        `Verification ke baad aapko jaldi se joining link mil jayega.\n\n` +
-        (consumedOffer
-          ? `🎁 *Private offer applied:* ${escapeMarkdown(consumedOffer.title)}${consumedOffer.discountPercent > 0 ? ` (*${consumedOffer.discountPercent}% OFF*)` : ''}\n\n`
-          : '') +
-        `⏱  Usually 20 minutes ke andar approval mil jata hai. Thoda wait karein please.`,
-        { parse_mode: 'Markdown' }
-      );
-
-      const keyboard = await buildApprovalKeyboard(newRequest._id);
-      const safeName = escapeMarkdown(user.name);
-      const safeUsername = user.username ? `@${escapeMarkdown(user.username)}` : 'N/A';
-      const referredByUser = user.referredBy || null;
-      const referredBySeller = user.sellerReferredBy || null;
-      const logMsg = await bot.telegram.sendMessage(
-        process.env.LOG_CHANNEL_ID,
-        `🆕 *New Premium Access Request*\n\n` +
-        `👤 Name: ${safeName}\n` +
-        `🆔 User ID: \`${ctx.from.id}\`\n` +
-        `📛 Username: ${safeUsername}\n` +
-        `🤝 Referred By (User): \`${referredByUser || 'N/A'}\`\n` +
-        `🛍 Referred By (Seller): \`${referredBySeller || 'N/A'}\`\n` +
-        (consumedOffer
-          ? `🎁 Private Offer: *${escapeMarkdown(consumedOffer.title)}*${consumedOffer.discountPercent > 0 ? ` (*${consumedOffer.discountPercent}% OFF*)` : ''}\n`
-          : '') +
-        `🎯 Referred To: \`${ctx.from.id}\`\n` +
-        `🕒 Time: ${new Date().toLocaleString('en-IN')}`,
-        { parse_mode: 'Markdown', reply_markup: keyboard }
-      );
-
-      await Request.findByIdAndUpdate(newRequest._id, { logMessageId: logMsg.message_id });
-      logger.info(
-        `New access request: referredByUser=${referredByUser || 'N/A'}, referredBySeller=${referredBySeller || 'N/A'}, referredTo=${ctx.from.id}`
+      await safeEditMessage(
+        ctx,
+        `✅ *Already Paid for premium*\n\nApna premium type choose karein:`,
+        {
+          parse_mode: 'Markdown',
+          ...premiumSelectionKeyboard(),
+        }
       );
     } catch (err) {
       logger.error(`request_access error: ${err.message}`);
@@ -460,80 +859,123 @@ const registerUserHandlers = (bot) => {
     }
   });
 
-  // ── One-click Renewal ──────────────────────────────────────────────────────
-  bot.action(/^renew_request_(.+)$/, async (ctx) => {
-    await ctx.answerCbQuery('Submitting renewal...');
+  bot.action('request_premium_movie', async (ctx) => {
+    await ctx.answerCbQuery('Submitting...');
     try {
-      const planId = ctx.match[1];
+      await submitPremiumRequest(ctx, PLAN_CATEGORY.MOVIE);
+    } catch (err) {
+      logger.error(`request_premium_movie error: ${err.message}`);
+      await ctx.reply('❌ Request failed. Please try again.');
+    }
+  });
+
+  bot.action('request_premium_desi', async (ctx) => {
+    await ctx.answerCbQuery('Submitting...');
+    try {
+      await submitPremiumRequest(ctx, PLAN_CATEGORY.DESI);
+    } catch (err) {
+      logger.error(`request_premium_desi error: ${err.message}`);
+      await ctx.reply('❌ Request failed. Please try again.');
+    }
+  });
+
+  bot.action('request_premium_non_desi', async (ctx) => {
+    await ctx.answerCbQuery('Submitting...');
+    try {
+      await submitPremiumRequest(ctx, PLAN_CATEGORY.NON_DESI);
+    } catch (err) {
+      logger.error(`request_premium_non_desi error: ${err.message}`);
+      await ctx.reply('❌ Request failed. Please try again.');
+    }
+  });
+
+  // ── Renewal (plan select → screenshot → admin approval) ───────────────────
+  bot.action(/^renew_request_(?:(movie|desi|non_desi)_)?(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery('Continue with payment screenshot...');
+    try {
+      const categoryFromCallback = normalizePlanCategory(ctx.match[1] || PLAN_CATEGORY.GENERAL);
+      const planId = ctx.match[2];
       const user = await findOrCreateUser(ctx.from);
       await User.findByIdAndUpdate(user._id, { lastInteraction: new Date() });
 
       const plan = await Plan.findById(planId);
       if (!plan) return ctx.reply('❌ Plan not found. Please try again.');
 
-      const existing = await getPendingRequest(ctx.from.id);
-      if (existing) {
+      const renewalCategory = normalizePlanCategory(plan.category || categoryFromCallback);
+      if (ctx.match[1] && renewalCategory !== categoryFromCallback) {
+        return ctx.reply('❌ Selected plan category mismatch. Please retry renewal from status.');
+      }
+
+      const activeOrGraceSub = await Subscription.findOne({
+        telegramId: ctx.from.id,
+        status: { $in: ['active', 'grace'] },
+        planCategory: renewalCategory,
+      });
+      if (!activeOrGraceSub) {
         return ctx.reply(
-          `⏳ *Renewal Pending hai!*\n\n` +
+          `⚠️ Aapke paas *${escapeMarkdown(getPlanCategoryLabel(renewalCategory))}* ka active/grace subscription nahi hai.\n\n` +
+          `Renew karne ke liye pehle us category ka active plan hona chahiye.`,
+          { parse_mode: 'Markdown' }
+        );
+      }
+
+      const existingPending = await Request.findOne({
+        telegramId: ctx.from.id,
+        status: 'pending',
+        requestCategory: renewalCategory,
+      });
+      if (existingPending) {
+        return ctx.reply(
+          `⏳ *${escapeMarkdown(getPlanCategoryLabel(renewalCategory))} renewal pending hai!*\n\n` +
           `Admin approval ka wait kijiye.`,
           { parse_mode: 'Markdown' }
         );
       }
 
-      const renewalReq = await Request.create({
-        userId: user._id,
-        telegramId: ctx.from.id,
-        status: 'pending',
-      });
-
-      const consumedOffer = await consumeOneTimeUserOffer(ctx.from.id, renewalReq._id);
-      if (consumedOffer) {
-        await Request.findByIdAndUpdate(renewalReq._id, {
-          appliedUserOffer: {
-            offerId: consumedOffer._id,
-            title: consumedOffer.title,
-            discountPercent: consumedOffer.discountPercent,
-          },
-        });
-      }
-
-      await ctx.reply(
-        `🔄 *Aapka Renewal Request Submit Ho Gaya Hai!*\n\n` +
-        `📋 Plan: *${plan.name}* (${plan.durationDays} days${plan.price ? ` · ₹${plan.price}` : ''})\n\n` +
-        (consumedOffer
-          ? `🎁 *Private offer applied:* ${escapeMarkdown(consumedOffer.title)}${consumedOffer.discountPercent > 0 ? ` (*${consumedOffer.discountPercent}% OFF*)` : ''}\n\n`
-          : '') +
-        `Apko jald se jald notification mil jayega.`,
-        { parse_mode: 'Markdown' }
-      );
-
-      const logMsg = await bot.telegram.sendMessage(
-        process.env.LOG_CHANNEL_ID,
-        (() => {
-          const safeName = escapeMarkdown(user.name);
-          const safeUsername = user.username ? `@${escapeMarkdown(user.username)}` : 'N/A';
-          const safePlanName = escapeMarkdown(plan.name);
-          return `🔄 *Renewal Request*\n\n` +
-            `👤 Name: ${safeName}\n` +
-            `🆔 ID: \`${ctx.from.id}\`\n` +
-            `📛 Username: ${safeUsername}\n` +
-            (consumedOffer
-              ? `🎁 Private Offer: *${escapeMarkdown(consumedOffer.title)}*${consumedOffer.discountPercent > 0 ? ` (*${consumedOffer.discountPercent}% OFF*)` : ''}\n`
-              : '') +
-            `📋 Plan: ${safePlanName} (${plan.durationDays} days${plan.price ? ` · ₹${plan.price}` : ''})`;
-        })(),
+      await User.findByIdAndUpdate(
+        user._id,
         {
-          parse_mode: 'Markdown',
-          reply_markup: {
-            inline_keyboard: [[
-              withStyle({ text: `✅ Approve`, callback_data: `approve_${renewalReq._id}_${plan._id}` }, 'success'),
-              withStyle({ text: '❌ Reject', callback_data: `reject_${renewalReq._id}` }, 'danger'),
-            ]],
+          $set: {
+            'meta.awaitingPaymentScreenshot': true,
+            'meta.paymentCategory': renewalCategory,
+            'meta.paymentFlowType': 'renewal',
+            'meta.renewalPlanId': String(plan._id),
+          },
+          $unset: {
+            'meta.paymentProofReadyForCategory': '',
+            'meta.latestPaymentProof': '',
           },
         }
       );
 
-      await Request.findByIdAndUpdate(renewalReq._id, { logMessageId: logMsg.message_id });
+      const callbackMessageId = ctx.callbackQuery?.message?.message_id;
+      const callbackChatId = ctx.callbackQuery?.message?.chat?.id;
+      const bestOffer = await getBestPublicOffer();
+      const discountedRenewalPrice = bestOffer?.discountPercent > 0
+        ? getDiscountedPrice(plan.price, bestOffer.discountPercent)
+        : plan.price;
+
+      await ctx.reply(
+        `📸 *Renewal Payment Screenshot Upload Karein*\n\n` +
+        `Category: *${escapeMarkdown(getPlanCategoryLabel(renewalCategory))}*\n` +
+        `Plan: *${escapeMarkdown(plan.name)}* (${plan.durationDays} days${plan.price ? ` · ₹${formatInr(plan.price)}` : ''})\n` +
+        (plan.price && bestOffer?.discountPercent > 0
+          ? `🎁 Offer: *${escapeMarkdown(bestOffer.title)}* (${bestOffer.discountPercent}% OFF)\n` +
+          `💰 Payable: *₹${formatInr(discountedRenewalPrice)}*\n\n`
+          : '\n') +
+        `Ab payment screenshot photo/document bhejiye.`,
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [withStyle(Markup.button.callback('❌ Cancel Upload', 'cancel_payment_upload'), 'danger')],
+            [withStyle(Markup.button.callback('🏠 Main Menu', 'back_to_main'), 'primary')],
+          ]),
+        }
+      );
+
+      if (callbackChatId && callbackMessageId) {
+        await ctx.telegram.deleteMessage(callbackChatId, callbackMessageId).catch(() => { });
+      }
     } catch (err) {
       logger.error(`renew_request error: ${err.message}`);
     }
@@ -544,29 +986,48 @@ const registerUserHandlers = (bot) => {
     try {
       await User.findOneAndUpdate({ telegramId: ctx.from.id }, { lastInteraction: new Date() });
 
-      const activeSub = await getActiveSubscription(ctx.from.id);
-      if (activeSub) {
-        const remaining = daysRemaining(activeSub.expiryDate);
-        const plans = await getActivePlans();
-        const inGroup = await isGroupMember(bot, process.env.PREMIUM_GROUP_ID, ctx.from.id);
+      const activeSubs = await Subscription.find({
+        telegramId: ctx.from.id,
+        status: 'active',
+        expiryDate: { $gt: new Date() },
+      }).sort({ expiryDate: 1 });
 
-        const groupWarning = !inGroup
-          ? `\n⚠️ *Aap Premium Group Me Nahi Hai!*\n` +
-          `Apne galti se leave kiya hai toh *₹${REJOINING_PENALTY}* dena parega.\n` +
-          `Support se baat karne ke liye /support likhen.\n`
-          : '';
+      if (activeSubs.length) {
+        const activeCategories = [...new Set(activeSubs.map((sub) => normalizePlanCategory(sub.planCategory || 'general')))]
+          .filter((category) => [PLAN_CATEGORY.MOVIE, PLAN_CATEGORY.DESI, PLAN_CATEGORY.NON_DESI].includes(category));
+
+        let message = `📊 *Your Subscription Status*\n\n` +
+          `✅ Status: *Active*\n` +
+          `📦 Active Plans: *${activeSubs.length}*\n\n`;
+
+        for (let index = 0; index < activeSubs.length; index += 1) {
+          const sub = activeSubs[index];
+          const category = normalizePlanCategory(sub.planCategory || 'general');
+          const groupId = sub.premiumGroupId || getGroupIdForCategory(category);
+          const inGroup = groupId ? await isGroupMember(bot, groupId, ctx.from.id) : false;
+          const remaining = daysRemaining(sub.expiryDate);
+
+          message +=
+            `${index + 1}. *${escapeMarkdown(getPlanCategoryLabel(category))}*\n` +
+            `📋 Plan: *${escapeMarkdown(sub.planName)}*\n` +
+            `📅 Expires on: *${formatDate(sub.expiryDate)}*\n` +
+            `⏳ Days Remaining: *${remaining} days*\n` +
+            `👥 Group Status: *${inGroup ? 'Joined' : 'Not Joined'}*\n`;
+
+          if (!inGroup) {
+            message +=
+              `⚠️ Rejoin penalty for this category: *₹${REJOINING_PENALTY}*\n` +
+              `Support: /support\n`;
+          }
+
+          message += '\n';
+        }
 
         return ctx.reply(
-          `📊 *Your Subscription*\n\n` +
-          `✅ Status: *Active*\n` +
-          `📋 Plan: *${activeSub.planName}*\n` +
-          `📅 Expires on: *${formatDate(activeSub.expiryDate)}*\n` +
-          `⏳ Days Remaining: *${remaining} days*\n` +
-          groupWarning +
-          (plans.length ? `\n💡 Aapko extend karna hai toh niche diye gaye plans se select karein:` : ''),
+          message + `💡 Renew karne ke liye niche category select karein.`,
           {
             parse_mode: 'Markdown',
-            reply_markup: plans.length ? renewalKeyboard(plans) : undefined,
+            ...renewCategoryKeyboard(activeCategories),
           }
         );
       }
@@ -576,7 +1037,7 @@ const registerUserHandlers = (bot) => {
         const daysOverdue = Math.floor((new Date() - graceSub.expiryDate) / (1000 * 60 * 60 * 24));
         const graceDays = parseInt(process.env.GRACE_PERIOD_DAYS) || 3;
         const left = Math.max(0, graceDays - daysOverdue);
-        const plans = await getActivePlans();
+        const plans = await Plan.find({ isActive: true, category: normalizePlanCategory(graceSub.planCategory || 'general') }).sort({ durationDays: 1 });
         return ctx.reply(
           `⚠️ *Subscription Expired — Grace Period*\n\n` +
           `Your subscription expired ${daysOverdue} day(s) ago.\n` +
@@ -611,6 +1072,83 @@ const registerUserHandlers = (bot) => {
     await showStatus(ctx);
   });
 
+  bot.action(/^status_renew_(movie|desi|non_desi)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    try {
+      const category = normalizePlanCategory(ctx.match[1]);
+      const activeSub = await Subscription.findOne({
+        telegramId: ctx.from.id,
+        status: 'active',
+        expiryDate: { $gt: new Date() },
+        planCategory: category,
+      });
+      if (!activeSub) {
+        return safeEditMessage(
+          ctx,
+          `⚠️ *${escapeMarkdown(getPlanCategoryLabel(category))}* currently active nahi hai.\n\n` +
+          `Renew button sirf active categories ke liye available hai.`,
+          {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+              [withStyle(Markup.button.callback('⬅️ Back to Status', 'check_status'), 'success')],
+              [withStyle(Markup.button.callback('🏠 Main Menu', 'back_to_main'), 'primary')],
+            ]),
+          }
+        );
+      }
+
+      const plans = await Plan.find({ isActive: true, category }).sort({ durationDays: 1 });
+      const bestOffer = await getBestPublicOffer();
+      const categoryLabel = getPlanCategoryLabel(category);
+
+      if (!plans.length) {
+        return safeEditMessage(
+          ctx,
+          `⚠️ *${escapeMarkdown(categoryLabel)}* ke liye abhi active renewal plans available nahi hain.\n\n` +
+          `Please support se contact karein.`,
+          {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+              [withStyle(Markup.button.callback('⬅️ Back to Status', 'check_status'), 'success')],
+              [withStyle(Markup.button.callback('🏠 Main Menu', 'back_to_main'), 'primary')],
+            ]),
+          }
+        );
+      }
+
+      const keyboard = {
+        inline_keyboard: [
+          ...plans.map((plan) => ([withStyle({
+            text: (() => {
+              if (!plan.price) return `🔄 Renew ${plan.durationDays} Days`;
+              if (bestOffer?.discountPercent > 0) {
+                const discounted = getDiscountedPrice(plan.price, bestOffer.discountPercent);
+                return `🔄 Renew ${plan.durationDays} Days · ₹${formatInr(discounted)}`;
+              }
+              return `🔄 Renew ${plan.durationDays} Days · ₹${formatInr(plan.price)}`;
+            })(),
+            callback_data: `renew_request_${category}_${plan._id}`,
+          }, 'success')])),
+          [withStyle(Markup.button.callback('⬅️ Back to Status', 'check_status'), 'success')],
+          [withStyle(Markup.button.callback('🏠 Main Menu', 'back_to_main'), 'primary')],
+        ],
+      };
+
+      await safeEditMessage(
+        ctx,
+        `🔄 *${escapeMarkdown(categoryLabel)} Renewal*\n\n` +
+        `Niche se plan select karein:`,
+        {
+          parse_mode: 'Markdown',
+          reply_markup: keyboard,
+        }
+      );
+    } catch (err) {
+      logger.error(`status_renew action error: ${err.message}`);
+      await ctx.reply('❌ Renewal options load nahi ho paye. Please try again.');
+    }
+  });
+
   // ── View Plans + Offers ───────────────────────────────────────────────────
   bot.action('view_plans_offers', async (ctx) => {
     await ctx.answerCbQuery();
@@ -623,7 +1161,7 @@ const registerUserHandlers = (bot) => {
       let message = `📋 *Plans ki Jankari*\n\n`;
 
       if (!plans.length) {
-        message += `Plan check karne k liye supoort se contact karen /support type karen\n\n`;
+        message += `Plan check karne k liye /start type karen\n\n`;
       } else {
         plans.forEach((plan, i) => {
           message += `${i + 1}. *${escapeMarkdown(plan.name)}* — ${plan.durationDays} days`;
@@ -776,6 +1314,8 @@ const registerUserHandlers = (bot) => {
       // We set a flag in User doc so next message creates the ticket
       await User.findOneAndUpdate({ telegramId: userId }, { $set: { 'meta.awaitingSupport': true } });
 
+      const supportCancelRows = supportCancelKeyboard().reply_markup?.inline_keyboard || [];
+
       await ctx.reply(
         `🎫 *Contact Support*\n\n` +
         `Hi ${user.name}! 👋\n\n` +
@@ -788,7 +1328,10 @@ const registerUserHandlers = (bot) => {
         `Chat ko close karne ke liye niche button use kijiye!`,
         {
           parse_mode: 'Markdown',
-          ...supportCancelKeyboard(),
+          ...Markup.inlineKeyboard([
+            ...supportCancelRows,
+            [withStyle(Markup.button.callback('🏠 Main Menu', 'back_to_main'), 'primary')],
+          ]),
         }
       );
     } catch (err) {
@@ -804,6 +1347,253 @@ const registerUserHandlers = (bot) => {
 
   bot.command('support', openSupportChat);
 
+  const onPaymentProofReceived = async (ctx, sourceType) => {
+    if (ctx.chat?.type !== 'private') return;
+
+    const userDoc = await User.findOne({ telegramId: ctx.from.id });
+    if (!userDoc?.meta?.awaitingPaymentScreenshot) return;
+
+    const category = normalizePlanCategory(userDoc?.meta?.paymentCategory);
+    const paymentFlowType = String(userDoc?.meta?.paymentFlowType || 'new_request');
+    const renewalPlanId = userDoc?.meta?.renewalPlanId || null;
+    const categoryLabel = getPlanCategoryLabel(category);
+    const safeName = escapeMarkdown(userDoc.name || ctx.from.first_name || 'User');
+    const safeUsername = userDoc.username ? `@${escapeMarkdown(userDoc.username)}` : 'N/A';
+
+    let fileId;
+    let fileUniqueId;
+
+    if (sourceType === 'photo') {
+      const photos = ctx.message?.photo || [];
+      const bestPhoto = photos[photos.length - 1];
+      fileId = bestPhoto?.file_id;
+      fileUniqueId = bestPhoto?.file_unique_id;
+    } else {
+      fileId = ctx.message?.document?.file_id;
+      fileUniqueId = ctx.message?.document?.file_unique_id;
+    }
+
+    if (!fileId) {
+      await ctx.reply('❌ Invalid screenshot. Please send a clear image.');
+      return;
+    }
+
+    let proofLogMessageId = null;
+    try {
+      const caption =
+        `🧾 *Payment Screenshot Submitted*\n\n` +
+        `📦 Category: *${escapeMarkdown(categoryLabel)}*\n` +
+        `👤 Name: ${safeName}\n` +
+        `🆔 User ID: \`${ctx.from.id}\`\n` +
+        `📛 Username: ${safeUsername}\n` +
+        `🕒 Time: ${new Date().toLocaleString('en-IN')}`;
+
+      const logMessage = sourceType === 'photo'
+        ? await bot.telegram.sendPhoto(process.env.LOG_CHANNEL_ID, fileId, { caption, parse_mode: 'Markdown' })
+        : await bot.telegram.sendDocument(process.env.LOG_CHANNEL_ID, fileId, { caption, parse_mode: 'Markdown' });
+
+      proofLogMessageId = logMessage?.message_id || null;
+    } catch (err) {
+      logger.error(`payment proof log error: ${err.message}`);
+    }
+
+    if (paymentFlowType === 'renewal' && renewalPlanId) {
+      const user = await findOrCreateUser(ctx.from);
+      const plan = await Plan.findById(renewalPlanId);
+      if (!plan) {
+        await User.findOneAndUpdate(
+          { telegramId: ctx.from.id },
+          {
+            $set: { 'meta.awaitingPaymentScreenshot': false },
+            $unset: {
+              'meta.paymentCategory': '',
+              'meta.paymentFlowType': '',
+              'meta.renewalPlanId': '',
+            },
+          }
+        );
+        await ctx.reply('❌ Renewal plan not found. Please open status and retry renewal.');
+        return;
+      }
+
+      const renewalCategory = normalizePlanCategory(plan.category || category);
+      if (renewalCategory !== category) {
+        await User.findOneAndUpdate(
+          { telegramId: ctx.from.id },
+          {
+            $set: { 'meta.awaitingPaymentScreenshot': false },
+            $unset: {
+              'meta.paymentCategory': '',
+              'meta.paymentFlowType': '',
+              'meta.renewalPlanId': '',
+            },
+          }
+        );
+        await ctx.reply('❌ Renewal category mismatch. Please retry renewal from status.');
+        return;
+      }
+
+      const existingPending = await Request.findOne({
+        telegramId: ctx.from.id,
+        status: 'pending',
+        requestCategory: renewalCategory,
+      });
+      if (existingPending) {
+        await User.findOneAndUpdate(
+          { telegramId: ctx.from.id },
+          {
+            $set: { 'meta.awaitingPaymentScreenshot': false },
+            $unset: {
+              'meta.paymentCategory': '',
+              'meta.paymentFlowType': '',
+              'meta.renewalPlanId': '',
+            },
+          }
+        );
+        await ctx.reply(
+          `⏳ *${escapeMarkdown(getPlanCategoryLabel(renewalCategory))} renewal pending hai!*\n\n` +
+          `Admin approval ka wait kijiye.`,
+          { parse_mode: 'Markdown' }
+        );
+        return;
+      }
+
+      const renewalReq = await Request.create({
+        userId: user._id,
+        telegramId: ctx.from.id,
+        status: 'pending',
+        requestCategory: renewalCategory,
+        selectedPlanId: plan._id,
+        paymentProof: {
+          fileId,
+          fileUniqueId,
+          sourceType,
+          logMessageId: proofLogMessageId,
+        },
+      });
+
+      const consumedOffer = await consumeOneTimeUserOffer(ctx.from.id, renewalReq._id);
+      const bestOffer = await getBestPublicOffer();
+      if (consumedOffer) {
+        await Request.findByIdAndUpdate(renewalReq._id, {
+          appliedUserOffer: {
+            offerId: consumedOffer._id,
+            title: consumedOffer.title,
+            discountPercent: consumedOffer.discountPercent,
+          },
+        });
+      }
+
+      await User.findByIdAndUpdate(user._id, {
+        $set: { 'meta.awaitingPaymentScreenshot': false },
+        $unset: {
+          'meta.latestPaymentProof': '',
+          'meta.paymentProofReadyForCategory': '',
+          'meta.paymentCategory': '',
+          'meta.paymentFlowType': '',
+          'meta.renewalPlanId': '',
+        },
+      });
+
+      await ctx.reply(
+        `✅ *${escapeMarkdown(categoryLabel)} renewal request submitted!*\n\n` +
+        `📋 Plan: *${escapeMarkdown(plan.name)}* (${plan.durationDays} days${plan.price ? ` · ₹${formatInr(plan.price)}` : ''})\n` +
+        (plan.price && bestOffer?.discountPercent > 0
+          ? `🎁 *Public offer applied:* ${escapeMarkdown(bestOffer.title)} (${bestOffer.discountPercent}% OFF)\n` +
+          `💰 Price: ~₹${formatInr(plan.price)}~ → *₹${formatInr(getDiscountedPrice(plan.price, bestOffer.discountPercent))}*\n\n`
+          : '\n') +
+        (consumedOffer
+          ? `🎁 *Private offer applied:* ${escapeMarkdown(consumedOffer.title)}${consumedOffer.discountPercent > 0 ? ` (*${consumedOffer.discountPercent}% OFF*)` : ''}\n\n`
+          : '') +
+        `Admin screenshot verify karke approval denge. Approval ke baad isi category plan me days add honge.`,
+        { parse_mode: 'Markdown' }
+      );
+
+      const safePlanName = escapeMarkdown(plan.name);
+      const logMsg = await bot.telegram.sendMessage(
+        process.env.LOG_CHANNEL_ID,
+        `🔄 *Renewal Request*\n\n` +
+        `📦 Category: *${escapeMarkdown(categoryLabel)}*\n` +
+        `👤 Name: ${safeName}\n` +
+        `🆔 ID: \`${ctx.from.id}\`\n` +
+        `📛 Username: ${safeUsername}\n` +
+        (plan.price && bestOffer?.discountPercent > 0
+          ? `🎁 Public Offer: *${escapeMarkdown(bestOffer.title)}* (${bestOffer.discountPercent}% OFF)\n` +
+          `💰 Price: ~₹${formatInr(plan.price)}~ → *₹${formatInr(getDiscountedPrice(plan.price, bestOffer.discountPercent))}*\n`
+          : '') +
+        (consumedOffer
+          ? `🎁 Private Offer: *${escapeMarkdown(consumedOffer.title)}*${consumedOffer.discountPercent > 0 ? ` (*${consumedOffer.discountPercent}% OFF*)` : ''}\n`
+          : '') +
+        `📋 Plan: ${safePlanName} (${plan.durationDays} days${plan.price ? ` · ₹${formatInr(plan.price)}` : ''})\n` +
+        `🧾 Payment Proof Log Msg: \`${proofLogMessageId || 'N/A'}\`\n` +
+        `🕒 Time: ${new Date().toLocaleString('en-IN')}`,
+        {
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [[
+              withStyle({ text: '✅ Approve', callback_data: `approve_${renewalReq._id}_${plan._id}` }, 'success'),
+              withStyle({ text: '❌ Reject', callback_data: `reject_${renewalReq._id}` }, 'danger'),
+            ]],
+          },
+        }
+      );
+
+      await Request.findByIdAndUpdate(renewalReq._id, { logMessageId: logMsg.message_id });
+      return;
+    }
+
+    await User.findOneAndUpdate(
+      { telegramId: ctx.from.id },
+      {
+        $set: {
+          'meta.awaitingPaymentScreenshot': false,
+          'meta.paymentProofReadyForCategory': category,
+          'meta.latestPaymentProof': {
+            fileId,
+            fileUniqueId,
+            sourceType,
+            logMessageId: proofLogMessageId,
+            category,
+            uploadedAt: new Date(),
+          },
+        },
+      }
+    );
+
+    await ctx.reply(
+      `✅ Appka payment Screenshot receive ho gaya hai.\n\n` +
+      `Aapne jis plan k liye payment kiya hai uska category *${escapeMarkdown(categoryLabel)}* pe tap karein.\n\n` +
+      `Hamari team jald hi aapke screenshot ko verify karegi aur Joining link bhejegi.\n\n` +
+      `Kripya intejaar karein.`,
+      {
+        parse_mode: 'Markdown',
+        ...premiumSelectionKeyboard(),
+      }
+    );
+  };
+
+  bot.on('photo', async (ctx, next) => {
+    try {
+      await onPaymentProofReceived(ctx, 'photo');
+    } catch (err) {
+      logger.error(`payment proof photo handler error: ${err.message}`);
+      await ctx.reply('❌ Screenshot process failed. Please try again.');
+    }
+    return next();
+  });
+
+  bot.on('document', async (ctx, next) => {
+    try {
+      const mime = String(ctx.message?.document?.mime_type || '').toLowerCase();
+      if (!mime.startsWith('image/')) return next();
+      await onPaymentProofReceived(ctx, 'document');
+    } catch (err) {
+      logger.error(`payment proof document handler error: ${err.message}`);
+      await ctx.reply('❌ Screenshot process failed. Please try again.');
+    }
+    return next();
+  });
+
   const closeSupportChat = async (ctx) => {
     const userId = ctx.from.id;
     try {
@@ -811,7 +1601,15 @@ const registerUserHandlers = (bot) => {
 
       const ticket = await getActiveTicket(userId);
       if (!ticket) {
-        return ctx.reply('ℹ️ Aapke paas koi open support chat nahi hai.');
+        return ctx.reply(
+          'ℹ️ Aapke paas koi open support chat nahi hai.',
+          {
+            ...Markup.inlineKeyboard([
+              [withStyle(Markup.button.callback('🎫 Start Support Chat', 'open_support'), 'primary')],
+              [withStyle(Markup.button.callback('🏠 Main Menu', 'back_to_main'), 'success')],
+            ]),
+          }
+        );
       }
 
       await closeTicket(bot, ticket.topicId, null, true);
@@ -849,6 +1647,20 @@ const registerUserHandlers = (bot) => {
 
       // Check if user is awaiting support (about to create ticket)
       const userDoc = await User.findOne({ telegramId: userId });
+      if (userDoc?.meta?.awaitingPaymentScreenshot) {
+        return ctx.reply(
+          `📸 Aap payment screenshot upload mode me hain.\n\n` +
+          `Kripya screenshot as photo/document bhejiye ya cancel karein.`,
+          {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+              [withStyle(Markup.button.callback('❌ Cancel Upload', 'cancel_payment_upload'), 'danger')],
+              [withStyle(Markup.button.callback('🏠 Main Menu', 'back_to_main'), 'primary')],
+            ]),
+          }
+        );
+      }
+
       const isAwaiting = userDoc?.meta?.awaitingSupport === true;
 
       // Check if user already has an open ticket

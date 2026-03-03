@@ -37,6 +37,31 @@ const requestSchema = new mongoose.Schema({
     ref: 'Plan',
     default: null,
   },
+  requestCategory: {
+    type: String,
+    enum: ['movie', 'desi', 'non_desi', 'general'],
+    default: 'general',
+    index: true,
+  },
+  paymentProof: {
+    fileId: {
+      type: String,
+      default: null,
+    },
+    fileUniqueId: {
+      type: String,
+      default: null,
+    },
+    sourceType: {
+      type: String,
+      enum: ['photo', 'document', null],
+      default: null,
+    },
+    logMessageId: {
+      type: Number,
+      default: null,
+    },
+  },
   logMessageId: {
     type: Number, // message ID in log channel for editing
     default: null,

@@ -26,6 +26,7 @@ const {
 const { formatDate, daysRemaining, addDays, startOfToday } = require('../utils/dateUtils');
 const { logToChannel } = require('../services/cronService');
 const { generateInviteLink, isGroupMember, safeSend, banFromGroup, unbanFromGroup } = require('../utils/telegramUtils');
+const { PLAN_CATEGORY, normalizePlanCategory, getGroupIdForCategory, getAllPremiumGroupIds } = require('../utils/premiumGroups');
 const logger = require('../utils/logger');
 
 const getSuperAdminIds = () => {
@@ -42,6 +43,68 @@ const requireAdmin = async (ctx, next) => {
   }
   ctx.adminUser = user;
   return next();
+};
+
+const getSubscriptionGroupId = (subscription) => {
+  if (subscription?.premiumGroupId) return String(subscription.premiumGroupId);
+  return getGroupIdForCategory(subscription?.planCategory || subscription?.planId?.category || 'general');
+};
+
+const VALID_PLAN_CATEGORIES = new Set(Object.values(PLAN_CATEGORY));
+
+const parseCategoryInput = (value) => {
+  if (!value) return null;
+  const normalized = String(value).toLowerCase().replace(/[-\s]/g, '_');
+  if (!VALID_PLAN_CATEGORIES.has(normalized)) return null;
+  return normalized;
+};
+
+const getActiveOrGraceSubscriptions = async (telegramId) => {
+  return Subscription.find({
+    telegramId,
+    status: { $in: ['active', 'grace'] },
+  }).sort({ expiryDate: -1, createdAt: -1 });
+};
+
+const resolveSubscriptionForAdminAction = async (telegramId, categoryInput = null) => {
+  const subscriptions = await getActiveOrGraceSubscriptions(telegramId);
+  if (!subscriptions.length) {
+    return { error: 'none' };
+  }
+
+  const normalizedCategory = categoryInput ? parseCategoryInput(categoryInput) : null;
+  if (categoryInput && !normalizedCategory) {
+    return { error: 'invalid_category' };
+  }
+
+  if (normalizedCategory) {
+    const matched = subscriptions.find(
+      (sub) => normalizePlanCategory(sub.planCategory || sub.planId?.category || 'general') === normalizedCategory
+    );
+    if (!matched) {
+      return { error: 'category_not_found', normalizedCategory, subscriptions };
+    }
+    return { subscription: matched, normalizedCategory, subscriptions };
+  }
+
+  if (subscriptions.length > 1) {
+    return { error: 'ambiguous', subscriptions };
+  }
+
+  return {
+    subscription: subscriptions[0],
+    normalizedCategory: normalizePlanCategory(subscriptions[0].planCategory || subscriptions[0].planId?.category || 'general'),
+    subscriptions,
+  };
+};
+
+const formatSubscriptionCategoryList = (subscriptions) => {
+  return subscriptions
+    .map((sub) => {
+      const category = normalizePlanCategory(sub.planCategory || sub.planId?.category || 'general');
+      return `- ${category}: ${sub.planName} (expires ${formatDate(sub.expiryDate)})`;
+    })
+    .join('\n');
 };
 
 const registerAdminHandlers = (bot) => {
@@ -139,21 +202,36 @@ const registerAdminHandlers = (bot) => {
         return ctx.answerCbQuery('ℹ️ Already processed', { show_alert: true });
       }
 
+      const requestCategory = normalizePlanCategory(request.requestCategory || 'general');
+
       // Resolve plan by _id or durationDays
       let plan = await Plan.findById(planOrDays).catch(() => null);
       if (!plan) {
         const days = parseInt(planOrDays);
-        plan = await Plan.findOne({ durationDays: days, isActive: true });
+        plan = await Plan.findOne({ durationDays: days, isActive: true, category: requestCategory });
         if (!plan) {
-          plan = await Plan.create({ name: `${days} Days Plan`, durationDays: days, price: 0 });
+          plan = await Plan.create({ name: `${days} Days Plan`, durationDays: days, price: 0, category: requestCategory });
         }
       }
 
-      const subscription = await createSubscription(request.telegramId, plan, ctx.from.id);
+      const resolvedPlanCategory = normalizePlanCategory(plan.category || requestCategory);
+      if (resolvedPlanCategory !== requestCategory) {
+        return ctx.answerCbQuery('❌ Plan category mismatch for this request', { show_alert: true });
+      }
+
+      const premiumGroupId = getGroupIdForCategory(resolvedPlanCategory);
+      if (!premiumGroupId) {
+        return ctx.answerCbQuery('❌ Premium group not configured for this category', { show_alert: true });
+      }
+
+      const subscription = await createSubscription(request.telegramId, plan, ctx.from.id, {
+        planCategory: resolvedPlanCategory,
+        premiumGroupId,
+      });
       await approveRequest(requestId, ctx.from.id, plan._id);
 
       // Check if user is already in the premium group (renewal case)
-      const alreadyInGroup = await isGroupMember(bot, process.env.PREMIUM_GROUP_ID, request.telegramId);
+      const alreadyInGroup = await isGroupMember(bot, premiumGroupId, request.telegramId);
 
       let userMessage;
       const extra = { parse_mode: 'Markdown' };
@@ -169,7 +247,7 @@ const registerAdminHandlers = (bot) => {
       } else {
         // New subscription or user left group — generate invite link
         const inviteLink = await generateInviteLink(
-          bot, process.env.PREMIUM_GROUP_ID, request.telegramId, subscription.expiryDate
+          bot, premiumGroupId, request.telegramId, subscription.expiryDate
         );
 
         if (inviteLink) {
@@ -218,6 +296,8 @@ const registerAdminHandlers = (bot) => {
       await logToChannel(bot,
         `✅ *Subscription ${subscription.isRenewal ? 'Renewed' : 'Approved'}*\n` +
         `User: \`${request.telegramId}\`\n` +
+        `Category: ${resolvedPlanCategory}\n` +
+        `Group: \`${premiumGroupId}\`\n` +
         `Plan: ${plan.name} (${plan.durationDays}d)\n` +
         `Expires: ${formatDate(subscription.expiryDate)}\n` +
         `By: ${ctx.from.username ? '@' + ctx.from.username : ctx.from.id}`
@@ -227,7 +307,13 @@ const registerAdminHandlers = (bot) => {
         adminId: ctx.from.id,
         actionType: 'approve_request',
         targetUserId: request.telegramId,
-        details: { plan: plan.name, durationDays: plan.durationDays, isRenewal: subscription.isRenewal },
+        details: {
+          plan: plan.name,
+          durationDays: plan.durationDays,
+          category: resolvedPlanCategory,
+          premiumGroupId,
+          isRenewal: subscription.isRenewal,
+        },
       });
 
     } catch (err) {
@@ -289,9 +375,11 @@ const registerAdminHandlers = (bot) => {
     const user = await User.findOne({ telegramId: targetId });
     if (!user) return ctx.reply(`❌ User \`${targetId}\` not found.`, { parse_mode: 'Markdown' });
 
-    const activeSub = await Subscription.findOne({
-      telegramId: targetId, status: 'active', expiryDate: { $gt: new Date() },
-    });
+    const activeSubs = await Subscription.find({
+      telegramId: targetId,
+      status: { $in: ['active', 'grace'] },
+      expiryDate: { $gt: new Date() },
+    }).sort({ expiryDate: 1 });
     const totalSubs = await Subscription.countDocuments({ telegramId: targetId });
 
     let msg = `👤 *User Profile*\n\n`;
@@ -304,10 +392,14 @@ const registerAdminHandlers = (bot) => {
     msg += `Blocked: ${user.isBlocked ? '🚫 Yes' : '✅ No'}\n`;
     msg += `Total Subscriptions: *${totalSubs}*\n`;
 
-    if (activeSub) {
-      msg += `\n📋 *Active Plan:* ${activeSub.planName}\n`;
-      msg += `⏰ Expires: ${formatDate(activeSub.expiryDate)}\n`;
-      msg += `⏳ Days Left: *${daysRemaining(activeSub.expiryDate)}*\n`;
+    if (activeSubs.length) {
+      msg += `\n📋 *Active/Grace Subscriptions:*\n`;
+      activeSubs.forEach((sub, index) => {
+        const category = normalizePlanCategory(sub.planCategory || sub.planId?.category || 'general');
+        msg += `${index + 1}. *${category}* — ${sub.planName}\n`;
+        msg += `   Status: ${sub.status}\n`;
+        msg += `   Expires: ${formatDate(sub.expiryDate)} (Days left: *${daysRemaining(sub.expiryDate)}*)\n`;
+      });
     } else {
       msg += `\n❌ No active subscription\n`;
     }
@@ -371,6 +463,11 @@ const registerAdminHandlers = (bot) => {
       }
 
       const startDate = new Date(expiryDate.getTime() - (plan.durationDays * 24 * 60 * 60 * 1000));
+      const legacyCategory = normalizePlanCategory(plan.category || 'general');
+      const legacyGroupId = getGroupIdForCategory(legacyCategory);
+      if (!legacyGroupId) {
+        return ctx.reply(`❌ Premium group not configured for category: ${legacyCategory}`);
+      }
 
       let imported = 0;
       let updated = 0;
@@ -380,7 +477,7 @@ const registerAdminHandlers = (bot) => {
 
       for (const telegramId of ids) {
         try {
-          const inGroup = await isGroupMember(bot, process.env.PREMIUM_GROUP_ID, telegramId);
+          const inGroup = await isGroupMember(bot, legacyGroupId, telegramId);
           if (!inGroup) {
             skippedNotInGroup++;
             continue;
@@ -405,6 +502,8 @@ const registerAdminHandlers = (bot) => {
           if (existingSub) {
             existingSub.planId = plan._id;
             existingSub.planName = plan.name;
+            existingSub.planCategory = legacyCategory;
+            existingSub.premiumGroupId = legacyGroupId;
             existingSub.durationDays = plan.durationDays;
             existingSub.startDate = startDate;
             existingSub.expiryDate = expiryDate;
@@ -422,6 +521,8 @@ const registerAdminHandlers = (bot) => {
               telegramId,
               planId: plan._id,
               planName: plan.name,
+              planCategory: legacyCategory,
+              premiumGroupId: legacyGroupId,
               durationDays: plan.durationDays,
               startDate,
               expiryDate,
@@ -475,17 +576,18 @@ const registerAdminHandlers = (bot) => {
     }
   });
 
-  // ── /revokeplan <telegramId> — terminate plan and remove from group ───────
+  // ── /revokeplan <telegramId> [category] — terminate specific plan ─────────
   bot.command('revokeplan', requireAdmin, async (ctx) => {
     try {
       const parts = String(ctx.message?.text || '').trim().split(/\s+/);
       if (parts.length < 2) {
-        return ctx.reply('Usage: /revokeplan <telegramId>');
+        return ctx.reply('Usage: /revokeplan <telegramId> [movie|desi|non_desi|general]');
       }
 
       const targetId = parseInt(parts[1], 10);
+      const categoryInput = parts[2] || null;
       if (!targetId) {
-        return ctx.reply('❌ Invalid telegramId. Usage: /revokeplan <telegramId>');
+        return ctx.reply('❌ Invalid telegramId. Usage: /revokeplan <telegramId> [category]');
       }
 
       const targetUser = await User.findOne({ telegramId: targetId });
@@ -493,14 +595,29 @@ const registerAdminHandlers = (bot) => {
         return ctx.reply(`❌ User \`${targetId}\` not found.`, { parse_mode: 'Markdown' });
       }
 
-      const activeSub = await Subscription.findOne({
-        telegramId: targetId,
-        status: { $in: ['active', 'grace'] },
-      }).sort({ createdAt: -1 });
-
-      if (!activeSub) {
+      const resolved = await resolveSubscriptionForAdminAction(targetId, categoryInput);
+      if (resolved.error === 'none') {
         return ctx.reply('ℹ️ No active/grace subscription found for this user.');
       }
+      if (resolved.error === 'invalid_category') {
+        return ctx.reply('❌ Invalid category. Use movie, desi, non_desi, or general.');
+      }
+      if (resolved.error === 'category_not_found') {
+        return ctx.reply(
+          `❌ No active/grace subscription found in category *${resolved.normalizedCategory}*.`,
+          { parse_mode: 'Markdown' }
+        );
+      }
+      if (resolved.error === 'ambiguous') {
+        return ctx.reply(
+          `⚠️ Multiple active/grace subscriptions found. Please pass category.\n\n` +
+          `Usage: /revokeplan <telegramId> [category]\n\n` +
+          `${formatSubscriptionCategoryList(resolved.subscriptions)}`
+        );
+      }
+
+      const activeSub = resolved.subscription;
+      const resolvedCategory = normalizePlanCategory(activeSub.planCategory || activeSub.planId?.category || 'general');
 
       const revokedAt = new Date();
       activeSub.status = 'cancelled';
@@ -509,14 +626,24 @@ const registerAdminHandlers = (bot) => {
       activeSub.graceNotifications = { day1: false, day2: false, day3: false };
       await activeSub.save();
 
+      const remainingActiveSubs = await Subscription.countDocuments({
+        telegramId: targetId,
+        status: { $in: ['active', 'grace'] },
+      });
+
       await User.findOneAndUpdate(
         { telegramId: targetId },
-        { status: 'inactive', graceDaysRemaining: null, lastInteraction: new Date() }
+        {
+          status: remainingActiveSubs > 0 ? 'active' : 'inactive',
+          graceDaysRemaining: null,
+          lastInteraction: new Date(),
+        }
       );
 
-      if (process.env.PREMIUM_GROUP_ID) {
-        await banFromGroup(bot, process.env.PREMIUM_GROUP_ID, targetId);
-        await unbanFromGroup(bot, process.env.PREMIUM_GROUP_ID, targetId);
+      const currentGroupId = getSubscriptionGroupId(activeSub);
+      if (currentGroupId) {
+        await banFromGroup(bot, currentGroupId, targetId);
+        await unbanFromGroup(bot, currentGroupId, targetId);
       }
 
       await safeSend(
@@ -535,11 +662,12 @@ const registerAdminHandlers = (bot) => {
           reason: 'Revoke incorrect approval',
           revokedSubscriptionId: activeSub._id,
           previousPlan: activeSub.planName,
+          category: resolvedCategory,
         },
       });
 
       await ctx.reply(
-        `✅ Plan revoked for user \`${targetId}\`.\nPrevious plan: *${activeSub.planName}*\nUser removed from premium group.`,
+        `✅ Plan revoked for user \`${targetId}\`.\nCategory: *${resolvedCategory}*\nPrevious plan: *${activeSub.planName}*\nUser removed from premium group.`,
         { parse_mode: 'Markdown' }
       );
     } catch (err) {
@@ -548,14 +676,14 @@ const registerAdminHandlers = (bot) => {
     }
   });
 
-  // ── /modifyplan <telegramId>|<planIdOrDays> — correct wrong plan ─────────
+  // ── /modifyplan <telegramId>|<planIdOrDays>|[category] — correct plan ───
   bot.command('modifyplan', requireAdmin, async (ctx) => {
     try {
       const raw = String(ctx.message?.text || '').replace('/modifyplan', '').trim();
-      const [idPart, planPart] = raw.split('|').map(s => s.trim());
+      const [idPart, planPart, categoryPart] = raw.split('|').map(s => s.trim());
 
       if (!idPart || !planPart) {
-        return ctx.reply('Usage: `/modifyplan <telegramId>|<planIdOrDays>`', { parse_mode: 'Markdown' });
+        return ctx.reply('Usage: `/modifyplan <telegramId>|<planIdOrDays>|[movie|desi|non_desi|general]`', { parse_mode: 'Markdown' });
       }
 
       const targetId = parseInt(idPart, 10);
@@ -581,21 +709,43 @@ const registerAdminHandlers = (bot) => {
         return ctx.reply('❌ Plan not found. Use `/plans` to see active plans.', { parse_mode: 'Markdown' });
       }
 
-      const activeSub = await Subscription.findOne({
-        telegramId: targetId,
-        status: { $in: ['active', 'grace'] },
-      }).sort({ createdAt: -1 });
-
-      if (!activeSub) {
+      const resolved = await resolveSubscriptionForAdminAction(targetId, categoryPart || null);
+      if (resolved.error === 'none') {
         return ctx.reply('ℹ️ No active/grace subscription found for this user to modify.');
       }
+      if (resolved.error === 'invalid_category') {
+        return ctx.reply('❌ Invalid category. Use movie, desi, non_desi, or general.');
+      }
+      if (resolved.error === 'category_not_found') {
+        return ctx.reply(
+          `❌ No active/grace subscription found in category *${resolved.normalizedCategory}* for modify.`,
+          { parse_mode: 'Markdown' }
+        );
+      }
+      if (resolved.error === 'ambiguous') {
+        return ctx.reply(
+          `⚠️ Multiple active/grace subscriptions found. Please pass category in 3rd argument.\n\n` +
+          `Usage: /modifyplan <telegramId>|<planIdOrDays>|[category]\n\n` +
+          `${formatSubscriptionCategoryList(resolved.subscriptions)}`
+        );
+      }
+
+      const activeSub = resolved.subscription;
+      const oldGroupId = getSubscriptionGroupId(activeSub);
 
       const previousPlan = activeSub.planName;
       const now = new Date();
       const newExpiry = new Date(now.getTime() + (plan.durationDays * 24 * 60 * 60 * 1000));
+      const newPlanCategory = normalizePlanCategory(plan.category || 'general');
+      const newGroupId = getGroupIdForCategory(newPlanCategory);
+      if (!newGroupId) {
+        return ctx.reply(`❌ Premium group not configured for category: ${newPlanCategory}`);
+      }
 
       activeSub.planId = plan._id;
       activeSub.planName = plan.name;
+      activeSub.planCategory = newPlanCategory;
+      activeSub.premiumGroupId = newGroupId;
       activeSub.durationDays = plan.durationDays;
       activeSub.startDate = now;
       activeSub.expiryDate = newExpiry;
@@ -612,7 +762,12 @@ const registerAdminHandlers = (bot) => {
         { status: 'active', graceDaysRemaining: null, lastInteraction: new Date() }
       );
 
-      const alreadyInGroup = await isGroupMember(bot, process.env.PREMIUM_GROUP_ID, targetId);
+      if (oldGroupId && String(oldGroupId) !== String(newGroupId)) {
+        await banFromGroup(bot, oldGroupId, targetId);
+        await unbanFromGroup(bot, oldGroupId, targetId);
+      }
+
+      const alreadyInGroup = await isGroupMember(bot, newGroupId, targetId);
       const extra = { parse_mode: 'Markdown' };
       let userMsg =
         `✅ *Your subscription plan has been updated by admin.*\n\n` +
@@ -621,7 +776,7 @@ const registerAdminHandlers = (bot) => {
         `⏰ Expires on: *${formatDate(newExpiry)}*`;
 
       if (!alreadyInGroup) {
-        const inviteLink = await generateInviteLink(bot, process.env.PREMIUM_GROUP_ID, targetId, newExpiry);
+        const inviteLink = await generateInviteLink(bot, newGroupId, targetId, newExpiry);
         if (inviteLink) {
           extra.reply_markup = {
             inline_keyboard: [[{ text: '🔗 Join Premium Group', url: inviteLink, style: 'success' }]],
@@ -645,13 +800,15 @@ const registerAdminHandlers = (bot) => {
           reason: 'Correct wrong selected plan',
           subscriptionId: activeSub._id,
           previousPlan,
+          previousCategory: resolved.normalizedCategory,
           newPlan: plan.name,
+          newCategory: newPlanCategory,
           newDurationDays: plan.durationDays,
         },
       });
 
       await ctx.reply(
-        `✅ Plan updated for user \`${targetId}\`.\n*${previousPlan}* → *${plan.name}*\nNew expiry: *${formatDate(newExpiry)}*`,
+        `✅ Plan updated for user \`${targetId}\`.\n*${previousPlan}* → *${plan.name}*\nCategory: *${newPlanCategory}*\nNew expiry: *${formatDate(newExpiry)}*`,
         { parse_mode: 'Markdown' }
       );
     } catch (err) {
@@ -660,17 +817,18 @@ const registerAdminHandlers = (bot) => {
     }
   });
 
-  // ── /invite <telegramId> — resend join link / reset pending request ──────
+  // ── /invite <telegramId> [category] — resend category-wise invite ─────────
   bot.command('invite', requireAdmin, async (ctx) => {
     try {
       const parts = String(ctx.message?.text || '').trim().split(/\s+/);
       if (parts.length < 2) {
-        return ctx.reply('Usage: /invite <telegramId>');
+        return ctx.reply('Usage: /invite <telegramId> [movie|desi|non_desi|general]');
       }
 
       const targetId = parseInt(parts[1], 10);
+      const categoryInput = parts[2] || null;
       if (!targetId) {
-        return ctx.reply('❌ Invalid telegramId. Usage: /invite <telegramId>');
+        return ctx.reply('❌ Invalid telegramId. Usage: /invite <telegramId> [category]');
       }
 
       const targetUser = await User.findOne({ telegramId: targetId });
@@ -684,13 +842,26 @@ const registerAdminHandlers = (bot) => {
         { status: 'rejected', actionDate: new Date(), actionBy: ctx.from.id }
       );
 
-      const activeSub = await Subscription.findOne({
-        telegramId: targetId,
-        status: { $in: ['active', 'grace'] },
-        expiryDate: { $gt: new Date() },
-      }).sort({ expiryDate: -1 });
+      const resolved = await resolveSubscriptionForAdminAction(targetId, categoryInput);
+      if (resolved.error === 'invalid_category') {
+        return ctx.reply('❌ Invalid category. Use movie, desi, non_desi, or general.');
+      }
+      if (resolved.error === 'category_not_found') {
+        return ctx.reply(
+          `❌ No active/grace subscription found in category *${resolved.normalizedCategory}* for invite.`,
+          { parse_mode: 'Markdown' }
+        );
+      }
+      if (resolved.error === 'ambiguous') {
+        return ctx.reply(
+          `⚠️ Multiple active/grace subscriptions found. Please pass category.\n\n` +
+          `Usage: /invite <telegramId> [category]\n\n` +
+          `${formatSubscriptionCategoryList(resolved.subscriptions)}`
+        );
+      }
 
-      if (!activeSub) {
+      const activeSub = resolved.subscription;
+      if (!activeSub || activeSub.expiryDate <= new Date()) {
         await User.findOneAndUpdate(
           { telegramId: targetId },
           { status: 'inactive', graceDaysRemaining: null, lastInteraction: new Date() }
@@ -721,7 +892,12 @@ const registerAdminHandlers = (bot) => {
         );
       }
 
-      const inviteLink = await generateInviteLink(bot, process.env.PREMIUM_GROUP_ID, targetId, activeSub.expiryDate);
+      const inviteGroupId = getSubscriptionGroupId(activeSub);
+      if (!inviteGroupId) {
+        return ctx.reply('❌ Premium group mapping missing for this user subscription.');
+      }
+
+      const inviteLink = await generateInviteLink(bot, inviteGroupId, targetId, activeSub.expiryDate);
       if (!inviteLink) {
         return ctx.reply('❌ Failed to generate a new invite link. Check bot group admin permissions.');
       }
@@ -752,6 +928,7 @@ const registerAdminHandlers = (bot) => {
         targetUserId: targetId,
         details: {
           subscriptionId: activeSub._id,
+          category: normalizePlanCategory(activeSub.planCategory || activeSub.planId?.category || 'general'),
           plan: activeSub.planName,
           expiryDate: activeSub.expiryDate,
           nullifiedPendingRequests: pendingResult?.modifiedCount || 0,
@@ -769,7 +946,7 @@ const registerAdminHandlers = (bot) => {
       );
 
       await ctx.reply(
-        `✅ New invite link sent to user \`${targetId}\`.\nPlan: *${activeSub.planName}*\nExpires: *${formatDate(activeSub.expiryDate)}*`,
+        `✅ New invite link sent to user \`${targetId}\`.\nCategory: *${normalizePlanCategory(activeSub.planCategory || activeSub.planId?.category || 'general')}*\nPlan: *${activeSub.planName}*\nExpires: *${formatDate(activeSub.expiryDate)}*`,
         { parse_mode: 'Markdown' }
       );
     } catch (err) {
@@ -887,8 +1064,9 @@ const registerAdminHandlers = (bot) => {
         { isBlocked: true, status: 'blocked', lastInteraction: new Date() }
       );
 
-      if (process.env.PREMIUM_GROUP_ID) {
-        await banFromGroup(bot, process.env.PREMIUM_GROUP_ID, targetId);
+      const groupIds = getAllPremiumGroupIds();
+      for (const groupId of groupIds) {
+        await banFromGroup(bot, groupId, targetId);
       }
 
       await safeSend(
@@ -936,8 +1114,9 @@ const registerAdminHandlers = (bot) => {
         { isBlocked: false, status: 'active', lastInteraction: new Date() }
       );
 
-      if (process.env.PREMIUM_GROUP_ID) {
-        await unbanFromGroup(bot, process.env.PREMIUM_GROUP_ID, targetId);
+      const groupIds = getAllPremiumGroupIds();
+      for (const groupId of groupIds) {
+        await unbanFromGroup(bot, groupId, targetId);
       }
 
       await safeSend(

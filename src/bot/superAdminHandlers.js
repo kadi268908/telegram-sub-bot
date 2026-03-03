@@ -80,15 +80,26 @@ const registerSuperAdminHandlers = (bot) => {
   });
 
   // ── Plan management ────────────────────────────────────────────────────────
-  // /createplan Name|days|price
+  // /createplan Name|days|price|category
   bot.command('createplan', requireSuperAdmin, async (ctx) => {
     const text = ctx.message.text.replace('/createplan', '').trim();
-    const [name, days, price] = text.split('|').map(s => s.trim());
-    if (!name || !days) return ctx.reply('Usage: `/createplan Name|days|price`', { parse_mode: 'Markdown' });
+    const [name, days, price, rawCategory] = text.split('|').map(s => s.trim());
+    if (!name || !days || !rawCategory) return ctx.reply('Usage: `/createplan Name|days|price|category`', { parse_mode: 'Markdown' });
     try {
-      const plan = await createPlan({ name, durationDays: parseInt(days), price: price ? parseFloat(price) : 0 });
+      const normalizedCategory = String(rawCategory).toLowerCase().replace(/[-\s]/g, '_');
+      const allowedCategories = new Set(['movie', 'desi', 'non_desi', 'general']);
+      if (!allowedCategories.has(normalizedCategory)) {
+        return ctx.reply('❌ Invalid category. Use: movie, desi, non_desi, general');
+      }
+
+      const plan = await createPlan({
+        name,
+        durationDays: parseInt(days),
+        price: price ? parseFloat(price) : 0,
+        category: normalizedCategory,
+      });
       await AdminLog.create({ adminId: ctx.from.id, actionType: 'create_plan', details: { planId: plan._id, name } });
-      await ctx.reply(`✅ Plan created: *${plan.name}* (${plan.durationDays} days)\nID: \`${plan._id}\``, { parse_mode: 'Markdown' });
+      await ctx.reply(`✅ Plan created: *${plan.name}* (${plan.durationDays} days)\nCategory: *${plan.category}*\nID: \`${plan._id}\``, { parse_mode: 'Markdown' });
     } catch (err) { await ctx.reply(`❌ ${err.message}`); }
   });
 
@@ -127,10 +138,36 @@ const registerSuperAdminHandlers = (bot) => {
   bot.command('listplans', requireSuperAdmin, async (ctx) => {
     const plans = await getAllPlans();
     if (!plans.length) return ctx.reply('No plans found.');
-    let msg = '📋 *All Plans*\n\n';
-    plans.forEach((p, i) => {
-      msg += `${i + 1}. *${p.name}* — ${p.durationDays} days — ₹${p.price} — ${p.isActive ? '✅' : '⏸'}\n   \`${p._id}\`\n`;
+    const grouped = {
+      movie: [],
+      desi: [],
+      non_desi: [],
+      general: [],
+    };
+
+    plans.forEach((plan) => {
+      const category = String(plan.category || 'general');
+      if (!grouped[category]) grouped[category] = [];
+      grouped[category].push(plan);
     });
+
+    let msg = '📋 *All Plans (Category-wise)*\n\n';
+    const orderedCategories = ['movie', 'desi', 'non_desi', 'general'];
+
+    for (const category of orderedCategories) {
+      const items = grouped[category] || [];
+      msg += `*${category.toUpperCase()}*\n`;
+      if (!items.length) {
+        msg += `No plans\n\n`;
+        continue;
+      }
+
+      items.forEach((p, i) => {
+        msg += `${i + 1}. *${p.name}* — ${p.durationDays} days — ₹${p.price} — ${p.isActive ? '✅' : '⏸'}\n   \`${p._id}\`\n`;
+      });
+      msg += `\n`;
+    }
+
     await ctx.reply(msg, { parse_mode: 'Markdown' });
   });
 

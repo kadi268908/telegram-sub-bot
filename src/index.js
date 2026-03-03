@@ -27,12 +27,24 @@ const logsDir = path.join(process.cwd(), 'logs');
 if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
 
 // Validate required env vars
-const required = ['BOT_TOKEN', 'MONGO_URI', 'PREMIUM_GROUP_ID', 'LOG_CHANNEL_ID'];
+const required = ['BOT_TOKEN', 'MONGO_URI', 'LOG_CHANNEL_ID'];
 for (const key of required) {
   if (!process.env[key]) {
     logger.error(`Missing required environment variable: ${key}`);
     process.exit(1);
   }
+}
+
+const configuredPremiumGroups = [
+  process.env.MOVIE_PREMIUM_GROUP_ID,
+  process.env.DESI_PREMIUM_GROUP_ID,
+  process.env.NON_DESI_PREMIUM_GROUP_ID,
+  process.env.PREMIUM_GROUP_ID,
+].filter(Boolean);
+
+if (!configuredPremiumGroups.length) {
+  logger.error('Missing premium group configuration. Set at least one of MOVIE_PREMIUM_GROUP_ID, DESI_PREMIUM_GROUP_ID, NON_DESI_PREMIUM_GROUP_ID, or PREMIUM_GROUP_ID.');
+  process.exit(1);
 }
 
 const superAdminIds = parseSuperAdminIds();

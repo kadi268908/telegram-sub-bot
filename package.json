@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "import:legacy-csv": "node src/utils/importLegacyUsersCsv.js"
+    "import:legacy-csv": "node src/utils/importLegacyUsersCsv.js",
+    "migrate:subscription-categories": "node src/utils/backfillSubscriptionCategories.js"
   },
   "dependencies": {
     "telegraf": "^4.16.3",

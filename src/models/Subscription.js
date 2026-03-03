@@ -24,6 +24,17 @@ const subscriptionSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
+  planCategory: {
+    type: String,
+    enum: ['movie', 'desi', 'non_desi', 'general'],
+    default: 'general',
+    index: true,
+  },
+  premiumGroupId: {
+    type: String,
+    default: null,
+    index: true,
+  },
   durationDays: {
     type: Number,
     required: true,

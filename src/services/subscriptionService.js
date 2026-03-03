@@ -6,6 +6,7 @@ const User = require('../models/User');
 const Plan = require('../models/Plan');
 const { addDays, startOfToday, endOfToday, startOfWeek, startOfMonth } = require('../utils/dateUtils');
 const logger = require('../utils/logger');
+const { normalizePlanCategory, getGroupIdForCategory } = require('../utils/premiumGroups');
 
 /**
  * Create or RENEW a subscription.
@@ -13,15 +14,19 @@ const logger = require('../utils/logger');
  * New: starts fresh from today.
  * Returns { subscription, isRenewal }
  */
-const createSubscription = async (telegramId, plan, adminId) => {
+const createSubscription = async (telegramId, plan, adminId, options = {}) => {
   try {
     const user = await User.findOne({ telegramId });
     if (!user) throw new Error(`User ${telegramId} not found`);
 
-    // Check for an existing active or grace-period subscription to extend
+    const planCategory = normalizePlanCategory(options.planCategory || plan.category);
+    const premiumGroupId = String(options.premiumGroupId || getGroupIdForCategory(planCategory) || '');
+
+    // Check for an existing active or grace-period subscription of SAME category to extend
     const existingSub = await Subscription.findOne({
       telegramId,
       status: { $in: ['active', 'grace'] },
+      planCategory,
     });
 
     if (existingSub) {
@@ -34,6 +39,8 @@ const createSubscription = async (telegramId, plan, adminId) => {
       existingSub.expiryDate = newExpiry;
       existingSub.planId = plan._id;
       existingSub.planName = plan.name;
+      existingSub.planCategory = planCategory;
+      existingSub.premiumGroupId = premiumGroupId || null;
       existingSub.durationDays = plan.durationDays;
       existingSub.status = 'active';
       existingSub.approvedBy = adminId;
@@ -57,6 +64,8 @@ const createSubscription = async (telegramId, plan, adminId) => {
       telegramId,
       planId: plan._id,
       planName: plan.name,
+      planCategory,
+      premiumGroupId: premiumGroupId || null,
       durationDays: plan.durationDays,
       startDate,
       expiryDate,
