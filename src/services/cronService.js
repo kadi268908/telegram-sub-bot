@@ -8,11 +8,14 @@
 //   offerExpiryChecker   - deactivate expired offers
 
 const cron = require('node-cron');
+const fs = require('fs/promises');
+const path = require('path');
 const Subscription = require('../models/Subscription');
 const User = require('../models/User');
 const Offer = require('../models/Offer');
 const Plan = require('../models/Plan');
 const AdminLog = require('../models/AdminLog');
+const Request = require('../models/Request');
 const { buildDailySummary } = require('./analyticsService');
 const { safeSend, isGroupMember, banFromGroup, renewalKeyboard } = require('../utils/telegramUtils');
 const { SUPPORT_CONTACT } = require('./supportService');
@@ -45,6 +48,93 @@ const getSubscriptionGroupId = (sub) => {
 const getRenewalPlansByCategory = async (category) => {
   const normalizedCategory = normalizePlanCategory(category);
   return Plan.find({ isActive: true, category: normalizedCategory }).sort({ durationDays: 1 });
+};
+
+const buildDailyBackupPayload = async (summary) => {
+  const now = new Date();
+  const [
+    totalUsers,
+    activeUsers,
+    blockedUsers,
+    activeSubscriptions,
+    graceSubscriptions,
+    pendingRequests,
+    activePlans,
+  ] = await Promise.all([
+    User.countDocuments({ role: 'user' }),
+    User.countDocuments({ role: 'user', status: 'active' }),
+    User.countDocuments({ role: 'user', isBlocked: true }),
+    Subscription.find({ status: 'active', expiryDate: { $gt: now } })
+      .select('telegramId planName planCategory premiumGroupId startDate expiryDate status approvedBy')
+      .sort({ expiryDate: 1 })
+      .lean(),
+    Subscription.find({ status: 'grace' })
+      .select('telegramId planName planCategory premiumGroupId expiryDate graceDaysUsed status')
+      .sort({ expiryDate: 1 })
+      .lean(),
+    Request.find({ status: 'pending' })
+      .select('telegramId username name requestCategory requestDate proofPhotoFileId proofDocumentFileId')
+      .sort({ requestDate: 1 })
+      .lean(),
+    Plan.find({ isActive: true })
+      .select('name category durationDays price isActive')
+      .sort({ category: 1, durationDays: 1 })
+      .lean(),
+  ]);
+
+  return {
+    generatedAt: now.toISOString(),
+    timezone: CRON_TIMEZONE,
+    dailySummary: summary,
+    counters: {
+      totalUsers,
+      activeUsers,
+      blockedUsers,
+      activeSubscriptions: activeSubscriptions.length,
+      graceSubscriptions: graceSubscriptions.length,
+      pendingRequests: pendingRequests.length,
+      activePlans: activePlans.length,
+    },
+    activeSubscriptions,
+    graceSubscriptions,
+    pendingRequests,
+    activePlans,
+  };
+};
+
+const sendDailyBackupToLogChannel = async (bot, summary) => {
+  try {
+    if (!process.env.LOG_CHANNEL_ID) {
+      logger.warn('sendDailyBackupToLogChannel skipped: LOG_CHANNEL_ID is not configured');
+      return;
+    }
+
+    const payload = await buildDailyBackupPayload(summary);
+    const dateStamp = new Date().toISOString().slice(0, 10);
+    const fileName = `daily-backup-${dateStamp}.json`;
+    const json = JSON.stringify(payload, null, 2);
+
+    const logsDir = path.resolve(process.cwd(), 'logs');
+    await fs.mkdir(logsDir, { recursive: true });
+    await fs.writeFile(path.join(logsDir, fileName), json, 'utf8');
+
+    await bot.telegram.sendDocument(
+      process.env.LOG_CHANNEL_ID,
+      { source: Buffer.from(json, 'utf8'), filename: fileName },
+      {
+        caption:
+          `🗂 *Daily Backup*\n` +
+          `Date: ${dateStamp}\n` +
+          `Active Subs: ${payload.counters.activeSubscriptions}\n` +
+          `Pending Requests: ${payload.counters.pendingRequests}`,
+        parse_mode: 'Markdown',
+      }
+    );
+
+    logger.info(`Daily backup sent to log channel: ${fileName}`);
+  } catch (err) {
+    logger.error(`sendDailyBackupToLogChannel error: ${err.message}`);
+  }
 };
 
 // ── Helper: post to log channel ──────────────────────────────────────────────
@@ -306,6 +396,8 @@ const dailySummaryJob = async (bot) => {
       `🔄 Renewals: ${summary.renewals}\n` +
       `❌ Expired Today: ${summary.expiredToday}\n`
     );
+
+    await sendDailyBackupToLogChannel(bot, summary);
   } catch (err) {
     logger.error(`dailySummaryJob error: ${err.message}`);
   }
