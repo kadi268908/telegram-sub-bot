@@ -14,6 +14,7 @@ const Request = require('../models/Request');
 const Subscription = require('../models/Subscription');
 const Plan = require('../models/Plan');
 const UserOffer = require('../models/UserOffer');
+const DmWordFilter = require('../models/DmWordFilter');
 
 const { findOrCreateUser } = require('../services/userService');
 const { getActiveOffers, getActivePlans } = require('../services/adminService');
@@ -201,6 +202,21 @@ const replacePreviousBotReply = async (ctx, chatId, sentMessage) => {
   }
 
   lastBotMessageByChat.set(key, sentMessage.message_id);
+};
+
+const normalizeFilterInput = (value) => String(value || '').trim().toLowerCase();
+
+const isDmTextMatchedByFilters = async (text) => {
+  const normalizedText = normalizeFilterInput(text);
+  if (!normalizedText) return false;
+
+  const filters = await DmWordFilter.find({}).select('normalizedPhrase').lean();
+  if (!filters.length) return false;
+
+  return filters.some((filter) => {
+    const phrase = normalizeFilterInput(filter?.normalizedPhrase);
+    return phrase && normalizedText.includes(phrase);
+  });
 };
 
 const notifySellerWithdrawalRequest = async (bot, ctx, request) => {
@@ -1675,6 +1691,9 @@ const registerUserHandlers = (bot) => {
       const activeTicket = await getActiveTicket(userId);
 
       if (!isAwaiting && !activeTicket) {
+        const shouldSendFilteredReply = await isDmTextMatchedByFilters(text);
+        if (!shouldSendFilteredReply) return next();
+
         return ctx.reply(
           `⚠️ *AK IMAX Premium*\n\n` +
           `Premium access lene ke liye pehle Plan Buy karen.\n` +

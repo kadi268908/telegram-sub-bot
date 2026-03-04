@@ -13,6 +13,7 @@ const Plan = require('../models/Plan');
 const Subscription = require('../models/Subscription');
 const AdminLog = require('../models/AdminLog');
 const UserOffer = require('../models/UserOffer');
+const DmWordFilter = require('../models/DmWordFilter');
 const { createSubscription } = require('../services/subscriptionService');
 const { approveRequest, rejectRequest, getActivePlans } = require('../services/adminService');
 const { awardReferralBonus, awardSellerCommission } = require('../services/referralService');
@@ -107,7 +108,89 @@ const formatSubscriptionCategoryList = (subscriptions) => {
     .join('\n');
 };
 
+const normalizeFilterPhrase = (value) => String(value || '').trim().toLowerCase();
+
+const parseFilterPhrase = (text = '', command = 'filter') => {
+  const escapedCommand = String(command || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const raw = String(text || '').replace(new RegExp(`^\\/${escapedCommand}\\b`, 'i'), '').trim();
+  if (!raw) return '';
+
+  const quoted = raw.match(/^"([\s\S]+)"$/);
+  if (quoted) return quoted[1].trim();
+  return raw;
+};
+
 const registerAdminHandlers = (bot) => {
+
+  // ── /filter <phrase> — add DM text filter phrase (admins + superadmins) ──
+  bot.command('filter', requireAdmin, async (ctx) => {
+    if (ctx.chat?.type !== 'private') {
+      return ctx.reply('❌ This command only works in DM/private chat.');
+    }
+
+    const phrase = parseFilterPhrase(ctx.message?.text || '');
+    const normalizedPhrase = normalizeFilterPhrase(phrase);
+
+    if (!normalizedPhrase) {
+      return ctx.reply('Usage: /filter "Any Word"');
+    }
+
+    try {
+      const existing = await DmWordFilter.findOne({ normalizedPhrase });
+      if (existing) {
+        return ctx.reply(`ℹ️ Filter already exists: "${existing.phrase}"`);
+      }
+
+      const created = await DmWordFilter.create({
+        phrase,
+        normalizedPhrase,
+        createdBy: ctx.from.id,
+      });
+
+      await AdminLog.create({
+        adminId: ctx.from.id,
+        actionType: 'add_filter_word',
+        details: { phrase: created.phrase },
+      });
+
+      await ctx.reply(`✅ DM filter added: "${created.phrase}"`);
+    } catch (err) {
+      logger.error(`filter command error: ${err.message}`);
+      await ctx.reply('❌ Failed to add filter. Please try again.');
+    }
+  });
+
+  // ── /unfilter <phrase> — remove DM text filter phrase (admins + superadmins) ──
+  bot.command('unfilter', requireAdmin, async (ctx) => {
+    if (ctx.chat?.type !== 'private') {
+      return ctx.reply('❌ This command only works in DM/private chat.');
+    }
+
+    const phrase = parseFilterPhrase(ctx.message?.text || '', 'unfilter');
+    const normalizedPhrase = normalizeFilterPhrase(phrase);
+
+    if (!normalizedPhrase) {
+      return ctx.reply('Usage: /unfilter "Any Word"');
+    }
+
+    try {
+      const removed = await DmWordFilter.findOneAndDelete({ normalizedPhrase });
+      if (!removed) {
+        return ctx.reply(`ℹ️ Filter not found: "${phrase}"`);
+      }
+
+      await AdminLog.create({
+        adminId: ctx.from.id,
+        actionType: 'remove_filter_word',
+        details: { phrase: removed.phrase },
+      });
+
+      await ctx.reply(`✅ DM filter removed: "${removed.phrase}"`);
+    } catch (err) {
+      logger.error(`unfilter command error: ${err.message}`);
+      await ctx.reply('❌ Failed to remove filter. Please try again.');
+    }
+  });
 
   // ── SUPPORT: Forward admin topic replies to user DM ────────────────────────
   // When an admin types a message inside a support forum topic,

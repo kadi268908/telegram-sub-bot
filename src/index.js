@@ -160,7 +160,7 @@ bot.command('help', async (ctx) => {
   msg += `*User:*\n/start — Main menu\n/status — Subscription status\n/referral — Your referral link\n/seller — Seller program dashboard\n/sellerwithdraw — Request seller withdrawal\n/support — Open a support ticket\n/help — This message\n`;
 
   if (['admin', 'superadmin'].includes(role)) {
-    msg += `\n*Admin:*\n/user <id> — User search panel\n/ban <id> — Ban user from bot\n/unban <id> — Restore bot access\n/invite <id> — Send fresh join link / reset pending request\n/offeruser <id>|<discount> — One-time private offer (today only)\n/revokeplan <id> — Terminate subscription + remove from group\n/modifyplan <id>|<planIdOrDays> — Correct user plan\n/expiries [today|0|1|3|7] — Check upcoming expiry users\n/plans — Active plans\n/tickets — Open support tickets\n`;
+    msg += `\n*Admin:*\n/user <id> — User search panel\n/ban <id> — Ban user from bot\n/unban <id> — Restore bot access\n/invite <id> — Send fresh join link / reset pending request\n/offeruser <id>|<discount> — One-time private offer (today only)\n/revokeplan <id> — Terminate subscription + remove from group\n/modifyplan <id>|<planIdOrDays> — Correct user plan\n/expiries [today|0|1|3|7] — Check upcoming expiry users\n/plans — Active plans\n/tickets — Open support tickets\n/filter "Any Word" — Add DM trigger filter\n/unfilter "Any Word" — Remove DM trigger filter\n`;
   }
   if (role === 'superadmin') {
     msg += `\n*Super Admin:*\n/addadmin <id> /removeadmin <id> /admins\n` +
