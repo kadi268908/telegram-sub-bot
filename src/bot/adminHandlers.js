@@ -828,7 +828,7 @@ const registerAdminHandlers = (bot) => {
         bot,
         targetId,
         `⚠️ *Your subscription has been revoked by admin.*\n\n` +
-        `Agar koi issue hai to support se contact karein: ${process.env.SUPPORT_CONTACT || '@ImaxSupport1Bot'}`,
+        `Agar koi issue hai to support se contact karein: /support\n\n`,
         { parse_mode: 'Markdown' }
       );
 
@@ -1251,7 +1251,7 @@ const registerAdminHandlers = (bot) => {
         bot,
         targetId,
         `⛔ *You have been banned from using this bot.*\n\n` +
-        `Please contact support for this issue: ${process.env.SUPPORT_CONTACT || '@ImaxSupport1Bot'}`,
+        `Please contact support for this issue: /support`,
         { parse_mode: 'Markdown' }
       );
 

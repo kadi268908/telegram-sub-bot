@@ -152,8 +152,7 @@ const closeTicket = async (bot, topicId, closedBy = null, byUser = false) => {
     `✅ *Support Chat Closed*\n\n` +
     `Ticket: \`${ticket.ticketId}\`\n` +
     `${closedByMsg}\n\n` +
-    `If you need help again tomorrow, use /support.\n` +
-    `For urgent issues: ${SUPPORT_CONTACT}`,
+    `If you need help again tomorrow, use /support.\n`,
     { parse_mode: 'Markdown' }
   );
 

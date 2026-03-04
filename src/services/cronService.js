@@ -264,7 +264,7 @@ const membershipMonitor = async (bot) => {
     const inGroup = await isGroupMember(bot, groupId, sub.telegramId);
     if (!inGroup) {
       await safeSend(bot, sub.telegramId,
-        `⚠️ *Rejoining Required*\n\nYou have an active subscription but aren't in the premium group.\n\nPlease contact support to get rejoined:\n👉 ${SUPPORT_CONTACT}`,
+        `⚠️ *Rejoining Required*\n\nYou have an active subscription but aren't in the premium group.\n\nPlease contact support to get rejoined: /support`,
         { parse_mode: 'Markdown' }
       );
       logger.info(`Sent support rejoin instruction to active user ${sub.telegramId}`);
