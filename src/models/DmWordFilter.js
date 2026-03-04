@@ -23,6 +23,28 @@ const dmWordFilterSchema = new mongoose.Schema({
         required: true,
         index: true,
     },
+    responseType: {
+        type: String,
+        enum: ['text', 'photo', 'sticker'],
+        required: true,
+        index: true,
+    },
+    responseText: {
+        type: String,
+        default: null,
+    },
+    responsePhotoFileId: {
+        type: String,
+        default: null,
+    },
+    responseStickerFileId: {
+        type: String,
+        default: null,
+    },
+    responseCaption: {
+        type: String,
+        default: null,
+    },
     createdAt: {
         type: Date,
         default: Date.now,

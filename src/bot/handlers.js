@@ -206,17 +206,51 @@ const replacePreviousBotReply = async (ctx, chatId, sentMessage) => {
 
 const normalizeFilterInput = (value) => String(value || '').trim().toLowerCase();
 
-const isDmTextMatchedByFilters = async (text) => {
+const findMatchedDmFilter = async (text) => {
   const normalizedText = normalizeFilterInput(text);
-  if (!normalizedText) return false;
+  if (!normalizedText) return null;
 
-  const filters = await DmWordFilter.find({}).select('normalizedPhrase').lean();
-  if (!filters.length) return false;
+  const filters = await DmWordFilter.find({})
+    .select('phrase normalizedPhrase responseType responseText responsePhotoFileId responseStickerFileId responseCaption')
+    .lean();
+  if (!filters.length) return null;
 
-  return filters.some((filter) => {
+  const sortedFilters = [...filters].sort((left, right) => {
+    const leftLen = String(left?.normalizedPhrase || '').length;
+    const rightLen = String(right?.normalizedPhrase || '').length;
+    return rightLen - leftLen;
+  });
+
+  return sortedFilters.find((filter) => {
     const phrase = normalizeFilterInput(filter?.normalizedPhrase);
     return phrase && normalizedText.includes(phrase);
-  });
+  }) || null;
+};
+
+const sendDmFilterResponse = async (ctx, filter) => {
+  const chatId = ctx.chat?.id;
+  if (!chatId) return false;
+
+  try {
+    let sentMessage;
+    if (filter?.responseType === 'photo' && filter?.responsePhotoFileId) {
+      sentMessage = await ctx.telegram.sendPhoto(chatId, filter.responsePhotoFileId, {
+        ...(filter.responseCaption ? { caption: filter.responseCaption } : {}),
+      });
+    } else if (filter?.responseType === 'sticker' && filter?.responseStickerFileId) {
+      sentMessage = await ctx.telegram.sendSticker(chatId, filter.responseStickerFileId);
+    } else {
+      const text = String(filter?.responseText || '').trim();
+      if (!text) return false;
+      sentMessage = await ctx.telegram.sendMessage(chatId, text);
+    }
+
+    await replacePreviousBotReply(ctx, chatId, sentMessage);
+    return true;
+  } catch (err) {
+    logger.error(`sendDmFilterResponse error: ${err.message}`);
+    return false;
+  }
 };
 
 const notifySellerWithdrawalRequest = async (bot, ctx, request) => {
@@ -1691,20 +1725,12 @@ const registerUserHandlers = (bot) => {
       const activeTicket = await getActiveTicket(userId);
 
       if (!isAwaiting && !activeTicket) {
-        const shouldSendFilteredReply = await isDmTextMatchedByFilters(text);
-        if (!shouldSendFilteredReply) return next();
+        const matchedFilter = await findMatchedDmFilter(text);
+        if (!matchedFilter) return next();
 
-        return ctx.reply(
-          `⚠️ *AK IMAX Premium*\n\n` +
-          `Premium access lene ke liye pehle Plan Buy karen.\n` +
-          `Niche diye gaye button pe click karein:`,
-          {
-            parse_mode: 'Markdown',
-            ...Markup.inlineKeyboard([
-              [withStyle(Markup.button.callback('📋 View Plans & Offers', 'view_plans_offers'), 'primary')],
-            ]),
-          }
-        );
+        const sent = await sendDmFilterResponse(ctx, matchedFilter);
+        if (sent) return;
+        return next();
       }
 
       if (isAwaiting && !activeTicket) {

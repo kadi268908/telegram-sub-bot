@@ -120,9 +120,49 @@ const parseFilterPhrase = (text = '', command = 'filter') => {
   return raw;
 };
 
+const extractFilterResponseFromReply = (replyMessage) => {
+  if (!replyMessage) {
+    return { error: 'missing_reply' };
+  }
+
+  if (replyMessage.sticker?.file_id) {
+    return {
+      responseType: 'sticker',
+      responseStickerFileId: replyMessage.sticker.file_id,
+      responseText: null,
+      responsePhotoFileId: null,
+      responseCaption: null,
+    };
+  }
+
+  if (Array.isArray(replyMessage.photo) && replyMessage.photo.length > 0) {
+    const bestPhoto = replyMessage.photo[replyMessage.photo.length - 1];
+    return {
+      responseType: 'photo',
+      responsePhotoFileId: bestPhoto.file_id,
+      responseCaption: String(replyMessage.caption || '').trim() || null,
+      responseText: null,
+      responseStickerFileId: null,
+    };
+  }
+
+  const text = String(replyMessage.text || '').trim();
+  if (text) {
+    return {
+      responseType: 'text',
+      responseText: text,
+      responsePhotoFileId: null,
+      responseStickerFileId: null,
+      responseCaption: null,
+    };
+  }
+
+  return { error: 'unsupported_reply' };
+};
+
 const registerAdminHandlers = (bot) => {
 
-  // ── /filter <phrase> — add DM text filter phrase (admins + superadmins) ──
+  // ── /filter <phrase> — reply-based DM trigger/response mapping ────────────
   bot.command('filter', requireAdmin, async (ctx) => {
     if (ctx.chat?.type !== 'private') {
       return ctx.reply('❌ This command only works in DM/private chat.');
@@ -130,30 +170,56 @@ const registerAdminHandlers = (bot) => {
 
     const phrase = parseFilterPhrase(ctx.message?.text || '');
     const normalizedPhrase = normalizeFilterPhrase(phrase);
+    const responsePayload = extractFilterResponseFromReply(ctx.message?.reply_to_message);
 
     if (!normalizedPhrase) {
-      return ctx.reply('Usage: /filter "Any Word"');
+      return ctx.reply('Usage: reply to a message/photo/sticker with /filter "Any Word"');
+    }
+
+    if (responsePayload.error === 'missing_reply') {
+      return ctx.reply('❌ Reply required. Reply to text/photo/sticker and send /filter "Any Word"');
+    }
+
+    if (responsePayload.error === 'unsupported_reply') {
+      return ctx.reply('❌ Unsupported reply type. Use text/emoji, photo (with or without caption), or sticker.');
     }
 
     try {
       const existing = await DmWordFilter.findOne({ normalizedPhrase });
-      if (existing) {
-        return ctx.reply(`ℹ️ Filter already exists: "${existing.phrase}"`);
-      }
+      let saved;
 
-      const created = await DmWordFilter.create({
-        phrase,
-        normalizedPhrase,
-        createdBy: ctx.from.id,
-      });
+      if (existing) {
+        existing.phrase = phrase;
+        existing.createdBy = ctx.from.id;
+        existing.responseType = responsePayload.responseType;
+        existing.responseText = responsePayload.responseText;
+        existing.responsePhotoFileId = responsePayload.responsePhotoFileId;
+        existing.responseStickerFileId = responsePayload.responseStickerFileId;
+        existing.responseCaption = responsePayload.responseCaption;
+        saved = await existing.save();
+      } else {
+        saved = await DmWordFilter.create({
+          phrase,
+          normalizedPhrase,
+          createdBy: ctx.from.id,
+          ...responsePayload,
+        });
+      }
 
       await AdminLog.create({
         adminId: ctx.from.id,
         actionType: 'add_filter_word',
-        details: { phrase: created.phrase },
+        details: {
+          phrase: saved.phrase,
+          responseType: saved.responseType,
+          mode: existing ? 'updated' : 'created',
+        },
       });
 
-      await ctx.reply(`✅ DM filter added: "${created.phrase}"`);
+      await ctx.reply(
+        `✅ DM filter ${existing ? 'updated' : 'added'}: "${saved.phrase}"\n` +
+        `Response type: ${saved.responseType}`
+      );
     } catch (err) {
       logger.error(`filter command error: ${err.message}`);
       await ctx.reply('❌ Failed to add filter. Please try again.');
@@ -189,6 +255,35 @@ const registerAdminHandlers = (bot) => {
     } catch (err) {
       logger.error(`unfilter command error: ${err.message}`);
       await ctx.reply('❌ Failed to remove filter. Please try again.');
+    }
+  });
+
+  // ── /filters — list all DM filters (admins + superadmins) ────────────────
+  bot.command('filters', requireAdmin, async (ctx) => {
+    if (ctx.chat?.type !== 'private') {
+      return ctx.reply('❌ This command only works in DM/private chat.');
+    }
+
+    try {
+      const filters = await DmWordFilter.find({})
+        .select('phrase responseType createdAt')
+        .sort({ createdAt: -1 })
+        .lean();
+
+      if (!filters.length) {
+        return ctx.reply('ℹ️ No filters found.');
+      }
+
+      let msg = `🧩 *DM Filters* (${filters.length})\n\n`;
+      filters.forEach((item, index) => {
+        msg += `${index + 1}. "${item.phrase}" → *${item.responseType}*\n`;
+      });
+
+      msg += `\nRemove with: /unfilter "Any Word"`;
+      await ctx.reply(msg, { parse_mode: 'Markdown' });
+    } catch (err) {
+      logger.error(`filters command error: ${err.message}`);
+      await ctx.reply('❌ Failed to fetch filters. Please try again.');
     }
   });
 
