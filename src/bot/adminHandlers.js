@@ -424,6 +424,7 @@ const registerAdminHandlers = (bot) => {
           `Thank you! 🙏`;
       } else {
         // New subscription or user left group — generate invite link
+        await unbanFromGroup(bot, premiumGroupId, request.telegramId);
         const inviteLink = await generateInviteLink(
           bot, premiumGroupId, request.telegramId, subscription.expiryDate
         );
@@ -954,6 +955,7 @@ const registerAdminHandlers = (bot) => {
         `⏰ Expires on: *${formatDate(newExpiry)}*`;
 
       if (!alreadyInGroup) {
+        await unbanFromGroup(bot, newGroupId, targetId);
         const inviteLink = await generateInviteLink(bot, newGroupId, targetId, newExpiry);
         if (inviteLink) {
           extra.reply_markup = {
@@ -1075,6 +1077,7 @@ const registerAdminHandlers = (bot) => {
         return ctx.reply('❌ Premium group mapping missing for this user subscription.');
       }
 
+      await unbanFromGroup(bot, inviteGroupId, targetId);
       const inviteLink = await generateInviteLink(bot, inviteGroupId, targetId, activeSub.expiryDate);
       if (!inviteLink) {
         return ctx.reply('❌ Failed to generate a new invite link. Check bot group admin permissions.');
