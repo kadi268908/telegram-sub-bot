@@ -20,6 +20,23 @@ const { addDays, formatDate, startOfToday } = require('../utils/dateUtils');
 const { getGroupIdForCategory, normalizePlanCategory } = require('../utils/premiumGroups');
 const logger = require('../utils/logger');
 
+const CRON_TIMEZONE = process.env.CRON_TIMEZONE || 'Asia/Kolkata';
+const REMINDER_CRON_SCHEDULES = (process.env.REMINDER_CRON_SCHEDULES || '15 9 * * *,0 20 * * *')
+  .split(',')
+  .map((schedule) => schedule.trim())
+  .filter(Boolean);
+
+const logCronTimeSnapshot = () => {
+  const now = new Date();
+  const localTime = now.toString();
+  const istTime = now.toLocaleString('en-GB', { timeZone: 'Asia/Kolkata', hour12: false });
+  const configuredTzTime = now.toLocaleString('en-GB', { timeZone: CRON_TIMEZONE, hour12: false });
+
+  logger.info(`[CRON] Server local time: ${localTime}`);
+  logger.info(`[CRON] IST time: ${istTime} (Asia/Kolkata)`);
+  logger.info(`[CRON] ${CRON_TIMEZONE} time: ${configuredTzTime}`);
+};
+
 const getSubscriptionGroupId = (sub) => {
   if (sub?.premiumGroupId) return String(sub.premiumGroupId);
   return getGroupIdForCategory(sub?.planCategory || 'general');
@@ -42,7 +59,7 @@ const logToChannel = async (bot, message) => {
 };
 
 // ── 1. REMINDER SCHEDULER ───────────────────────────────────────────────────
-// Runs daily at 8:00 AM
+// Runs daily at 9:00 AM
 // Sends reminders at 7, 3, 1 day before expiry and on expiry day
 const reminderScheduler = async (bot) => {
   logger.info('[CRON] Running reminderScheduler...');
@@ -370,15 +387,21 @@ const inviteLinkExpiryNotifier = async (bot) => {
 
 // ── INIT: Register all cron schedules ─────────────────────────────────────────
 const initCronJobs = (bot) => {
-  cron.schedule('0 8 * * *', () => reminderScheduler(bot));    // 8:00 AM
-  cron.schedule('0 9 * * *', () => gracePeriodHandler(bot));   // 9:00 AM
-  cron.schedule('0 10 * * *', () => inactiveUserDetector(bot)); // 10:00 AM
-  cron.schedule('0 11 * * *', () => membershipMonitor(bot));    // 11:00 AM
-  cron.schedule('59 23 * * *', () => dailySummaryJob(bot));      // 23:59
-  cron.schedule('5 0 * * *', () => offerExpiryChecker());      // 00:05
-  cron.schedule('*/15 * * * *', () => inviteLinkExpiryNotifier(bot)); // every 15 min
+  logCronTimeSnapshot();
+  const cronOptions = { timezone: CRON_TIMEZONE };
 
-  logger.info('All cron jobs initialized.');
+  for (const schedule of REMINDER_CRON_SCHEDULES) {
+    cron.schedule(schedule, () => reminderScheduler(bot), cronOptions);
+  }
+  cron.schedule('0 9 * * *', () => gracePeriodHandler(bot), cronOptions);    // 9:00 AM
+  cron.schedule('0 10 * * *', () => inactiveUserDetector(bot), cronOptions); // 10:00 AM
+  cron.schedule('0 11 * * *', () => membershipMonitor(bot), cronOptions);    // 11:00 AM
+  cron.schedule('59 23 * * *', () => dailySummaryJob(bot), cronOptions);     // 23:59
+  cron.schedule('5 0 * * *', () => offerExpiryChecker(), cronOptions);       // 00:05
+  cron.schedule('*/15 * * * *', () => inviteLinkExpiryNotifier(bot), cronOptions); // every 15 min
+
+  logger.info(`Reminder schedules initialized: ${REMINDER_CRON_SCHEDULES.join(' | ')}`);
+  logger.info(`All cron jobs initialized. Timezone: ${CRON_TIMEZONE}`);
 };
 
 module.exports = {

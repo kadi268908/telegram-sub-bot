@@ -58,6 +58,8 @@ npm start
 | `SUPER_ADMIN_IDS` | ✅ | Comma-separated Telegram user IDs for super admins (e.g. `123,456`) |
 | `BONUS_REFERRAL_DAYS` | ❌ | Default: 3 |
 | `GRACE_PERIOD_DAYS` | ❌ | Default: 3 |
+| `CRON_TIMEZONE` | ❌ | Cron timezone (IANA), default: `Asia/Kolkata` |
+| `REMINDER_CRON_SCHEDULES` | ❌ | Comma-separated cron expressions for reminders, default: `0 8 * * *,0 20 * * *` |
 | `PORT` | ❌ | Health check port |
 
 ---
