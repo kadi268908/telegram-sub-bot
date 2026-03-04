@@ -35,6 +35,7 @@ const adminLogSchema = new mongoose.Schema({
       'seller_withdraw_request',
       'seller_withdraw_approve',
       'seller_withdraw_reject',
+      'revoke_seller',
       'add_filter_word',
       'remove_filter_word',
     ],

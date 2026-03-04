@@ -15,6 +15,7 @@ const Subscription = require('../models/Subscription');
 const Plan = require('../models/Plan');
 const UserOffer = require('../models/UserOffer');
 const DmWordFilter = require('../models/DmWordFilter');
+const AdminLog = require('../models/AdminLog');
 
 const { findOrCreateUser } = require('../services/userService');
 const { getActiveOffers, getActivePlans } = require('../services/adminService');
@@ -1040,9 +1041,43 @@ const registerUserHandlers = (bot) => {
   });
 
   // ── /status + check_status button ─────────────────────────────────────────
+  const buildPurchaseHistoryText = async (telegramId) => {
+    const logs = await AdminLog.find({
+      actionType: 'approve_request',
+      targetUserId: telegramId,
+    })
+      .sort({ timestamp: 1, _id: 1 })
+      .lean();
+
+    let historyText = `🧾 *Purchase & Renewal History*\n\n`;
+
+    if (!logs.length) {
+      historyText += `No purchase history found yet.\n\n`;
+      return historyText;
+    }
+
+    logs.forEach((log, index) => {
+      const isRenewal = Boolean(log?.details?.isRenewal);
+      const eventLabel = isRenewal ? 'Renewal' : 'Purchase';
+      const categoryLabel = getPlanCategoryLabel(log?.details?.category || 'general');
+      const planName = escapeMarkdown(log?.details?.plan || 'Plan');
+      const durationDays = Number(log?.details?.durationDays || 0);
+      const eventDate = formatDate(log?.timestamp || new Date());
+
+      historyText +=
+        `${index + 1}. *${eventLabel}* — *${escapeMarkdown(categoryLabel)}*\n` +
+        `   Plan: *${planName}*${durationDays > 0 ? ` (${durationDays} days)` : ''}\n` +
+        `   Date: *${eventDate}*\n\n`;
+    });
+
+    return historyText;
+  };
+
   const showStatus = async (ctx) => {
     try {
       await User.findOneAndUpdate({ telegramId: ctx.from.id }, { lastInteraction: new Date() });
+
+      const purchaseHistoryText = await buildPurchaseHistoryText(ctx.from.id);
 
       const activeSubs = await Subscription.find({
         telegramId: ctx.from.id,
@@ -1054,7 +1089,8 @@ const registerUserHandlers = (bot) => {
         const activeCategories = [...new Set(activeSubs.map((sub) => normalizePlanCategory(sub.planCategory || 'general')))]
           .filter((category) => [PLAN_CATEGORY.MOVIE, PLAN_CATEGORY.DESI, PLAN_CATEGORY.NON_DESI].includes(category));
 
-        let message = `📊 *Your Subscription Status*\n\n` +
+        let message = purchaseHistoryText +
+          `📊 *Current Subscription Status*\n\n` +
           `✅ Status: *Active*\n` +
           `📦 Active Plans: *${activeSubs.length}*\n\n`;
 
@@ -1097,6 +1133,8 @@ const registerUserHandlers = (bot) => {
         const left = Math.max(0, graceDays - daysOverdue);
         const plans = await Plan.find({ isActive: true, category: normalizePlanCategory(graceSub.planCategory || 'general') }).sort({ durationDays: 1 });
         return ctx.reply(
+          purchaseHistoryText +
+          `📊 *Current Subscription Status*\n\n` +
           `⚠️ *Subscription Expired — Grace Period*\n\n` +
           `Your subscription expired ${daysOverdue} day(s) ago.\n` +
           `⏳ *${left} grace day(s)* k baad aap group se remove ho jayenge.\n\n` +
@@ -1109,6 +1147,8 @@ const registerUserHandlers = (bot) => {
       }
 
       await ctx.reply(
+        purchaseHistoryText +
+        `📊 *Current Subscription Status*\n\n` +
         `❌ *No Active Subscription*\n\n` +
         `Aapka koi subscription active nahi hai.\n` +
         `Niche diye gaye button pe click karein premium join request:`,

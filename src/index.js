@@ -173,7 +173,8 @@ bot.command('help', async (ctx) => {
       `/stats — Growth dashboard\n` +
       `/planstats — Plan performance\n` +
       `/adminlogs — Audit log\n` +
-      `/sellerwithdrawals /approvesellerwd /rejectsellerwd — Seller payouts\n`;
+      `/sellerwithdrawals /approvesellerwd /rejectsellerwd — Seller payouts\n` +
+      `/revokeseller <id> — Revoke seller access\n`;
   }
 
   await ctx.reply(msg, { parse_mode: 'Markdown' });

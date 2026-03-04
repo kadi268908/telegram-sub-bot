@@ -6,6 +6,7 @@ const Plan = require('../models/Plan');
 const Subscription = require('../models/Subscription');
 const Request = require('../models/Request');
 const AdminLog = require('../models/AdminLog');
+const SellerWithdrawalRequest = require('../models/SellerWithdrawalRequest');
 const {
   addAdmin, removeAdmin, createPlan, updatePlan, deletePlan,
   getAllPlans, getActivePlans, createOffer, deleteOffer, getActiveOffers
@@ -485,6 +486,94 @@ const registerSuperAdminHandlers = (bot) => {
 
       await ctx.reply(`✅ Rejected withdrawal \`${request._id}\`.`, { parse_mode: 'Markdown' });
     } catch (err) {
+      await ctx.reply(`❌ ${err.message}`);
+    }
+  });
+
+  // ── /revokeseller <telegramId> — revoke seller program access ───────────
+  bot.command('revokeseller', requireSuperAdmin, async (ctx) => {
+    const targetId = parseInt((ctx.message.text.split(' ')[1] || '').trim(), 10);
+    if (!targetId) return ctx.reply('Usage: /revokeseller <telegramId>');
+
+    try {
+      const user = await User.findOne({ telegramId: targetId });
+      if (!user) return ctx.reply(`❌ User \`${targetId}\` not found.`, { parse_mode: 'Markdown' });
+
+      if (!user.isSeller && !user.sellerCode) {
+        return ctx.reply(`ℹ️ User \`${targetId}\` is not an active seller.`, { parse_mode: 'Markdown' });
+      }
+
+      const previousSellerCode = user.sellerCode || null;
+
+      const pendingRequests = await SellerWithdrawalRequest.find({
+        sellerTelegramId: targetId,
+        status: 'pending',
+      }).select('_id').lean();
+
+      const pendingRequestIds = pendingRequests.map((request) => String(request._id));
+      const rejectedPendingCount = pendingRequestIds.length;
+
+      if (rejectedPendingCount > 0) {
+        await SellerWithdrawalRequest.updateMany(
+          { _id: { $in: pendingRequestIds } },
+          {
+            $set: {
+              status: 'rejected',
+              reviewedAt: new Date(),
+              reviewedBy: ctx.from.id,
+              note: 'Auto-rejected due to seller revocation',
+            },
+          }
+        );
+      }
+
+      await User.findByIdAndUpdate(user._id, {
+        $set: { isSeller: false },
+        $unset: {
+          sellerCode: '',
+          'meta.sellerRegisteredAt': '',
+        },
+      });
+
+      await AdminLog.create({
+        adminId: ctx.from.id,
+        actionType: 'revoke_seller',
+        targetUserId: targetId,
+        details: {
+          previousSellerCode,
+          rejectedPendingCount,
+          rejectedPendingRequestIds: pendingRequestIds,
+        },
+      });
+
+      await safeSend(
+        bot,
+        targetId,
+        `⛔ *Seller Program Revoked*\n\n` +
+        `Your seller access has been revoked by admin.\n` +
+        (rejectedPendingCount > 0
+          ? `Pending withdrawals rejected: *${rejectedPendingCount}*.\n`
+          : '') +
+        `If this is unexpected, contact support.`,
+        { parse_mode: 'Markdown' }
+      );
+
+      await logToChannel(
+        bot,
+        `⛔ *Seller Revoked*\n` +
+        `User: \`${targetId}\`\n` +
+        `By: ${ctx.from.username ? '@' + ctx.from.username : ctx.from.id}` +
+        (rejectedPendingCount > 0 ? `\nPending WD Rejected: ${rejectedPendingCount}` : '') +
+        `${previousSellerCode ? `\nPrevious Code: \`${previousSellerCode}\`` : ''}`
+      );
+
+      await ctx.reply(
+        `✅ Seller revoked for \`${targetId}\`.` +
+        (rejectedPendingCount > 0 ? `\n❌ Rejected pending withdrawals: *${rejectedPendingCount}*` : ''),
+        { parse_mode: 'Markdown' }
+      );
+    } catch (err) {
+      logger.error(`revokeseller error: ${err.message}`);
       await ctx.reply(`❌ ${err.message}`);
     }
   });
