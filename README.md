@@ -16,6 +16,7 @@ Production-ready Telegram bot with advanced subscription management, referrals, 
 | Membership Monitor | Daily check: resend invites / remove expired users |
 | Block Detection | 403 errors update user status + log to channel |
 | Growth Dashboard | /stats — total/active/expired/blocked/new/renewals |
+| Category Stats Export | /categorystats — category-wise CSV snapshot |
 | Plan Performance | /planstats — active users per plan |
 | Daily Auto-Summary | Posted to log channel every night at 23:59 |
 | User Search Panel | /user <id> — full profile for admins |
@@ -154,6 +155,7 @@ src/
 | Command | Description |
 |---|---|
 | `/stats` | Growth dashboard |
+| `/categorystats` | Category-wise CSV snapshot |
 | `/planstats` | Active users per plan |
 | `/adminlogs` | Last 15 admin actions |
 | `/addadmin <id>` | Promote to admin |

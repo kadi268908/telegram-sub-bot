@@ -176,6 +176,7 @@ bot.command('help', async (ctx) => {
       `/health — Runtime snapshot (DB/bot/cron)\n` +
       `/reports — Sales reports\n` +
       `/stats — Growth dashboard\n` +
+      `/categorystats — Category-wise CSV snapshot\n` +
       `/planstats — Plan performance\n` +
       `/adminlogs — Audit log\n` +
       `/sellerwithdrawals /approvesellerwd /rejectsellerwd — Seller payouts\n` +

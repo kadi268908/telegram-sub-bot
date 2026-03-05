@@ -14,7 +14,7 @@ const {
   getAllPlans, getActivePlans, createOffer, deleteOffer, getActiveOffers
 } = require('../services/adminService');
 const { getSalesReport, getTodayExpiryList } = require('../services/subscriptionService');
-const { getGrowthStats, getPlanPerformance } = require('../services/analyticsService');
+const { getGrowthStats, getCategoryWiseStats, getPlanPerformance } = require('../services/analyticsService');
 const {
   getSellerWithdrawalRequests,
   getPendingSellerWithdrawalRequests,
@@ -607,7 +607,29 @@ const registerSuperAdminHandlers = (bot) => {
   // ── /stats — growth dashboard ──────────────────────────────────────────────
   bot.command('stats', requireSuperAdmin, async (ctx) => {
     try {
-      const s = await getGrowthStats();
+      const [s, categoryStats] = await Promise.all([
+        getGrowthStats(),
+        getCategoryWiseStats(),
+      ]);
+
+      const categoryLabel = {
+        movie: 'Movie',
+        desi: 'Desi',
+        non_desi: 'Non-Desi',
+        movie_desi: 'Movie + Desi',
+        movie_non_desi: 'Movie + Non-Desi',
+        general: 'General',
+      };
+
+      let categorySection = '\n\n📂 *Category-wise*\n';
+      categoryStats.forEach((row) => {
+        const label = categoryLabel[row.category] || row.category;
+        categorySection +=
+          `\n• *${label}*` +
+          `\n  Active: *${row.activeSubscriptions}* | Pending: *${row.pendingRequests}*` +
+          `\n  Approved Today: *${row.approvalsToday}* | Renewals Today: *${row.renewalsToday}*\n`;
+      });
+
       await ctx.reply(
         `📈 *Growth Dashboard*\n\n` +
         `👥 Total Users: *${s.total}*\n` +
@@ -615,11 +637,83 @@ const registerSuperAdminHandlers = (bot) => {
         `❌ Expired: *${s.expired}*\n` +
         `🚫 Blocked: *${s.blocked}*\n` +
         `🆕 New Today: *${s.newToday}*\n` +
-        `🔄 Renewals Today: *${s.renewalsToday}*`,
+        `🔄 Renewals Today: *${s.renewalsToday}*` +
+        categorySection,
         { parse_mode: 'Markdown' }
       );
     } catch (err) {
       await ctx.reply('❌ Error fetching stats.');
+    }
+  });
+
+  // ── /categorystats — category-wise CSV snapshot ───────────────────────────
+  bot.command('categorystats', requireSuperAdmin, async (ctx) => {
+    try {
+      const categoryStats = await getCategoryWiseStats();
+      const generatedAt = new Date();
+
+      const categoryLabel = {
+        movie: 'Movie',
+        desi: 'Desi',
+        non_desi: 'Non-Desi',
+        movie_desi: 'Movie + Desi',
+        movie_non_desi: 'Movie + Non-Desi',
+        general: 'General',
+      };
+
+      const rows = [
+        ['Section', 'Category', 'ActiveSubscriptions', 'PendingRequests', 'ApprovalsToday', 'RenewalsToday', 'GeneratedAt'],
+      ];
+
+      let totals = {
+        activeSubscriptions: 0,
+        pendingRequests: 0,
+        approvalsToday: 0,
+        renewalsToday: 0,
+      };
+
+      categoryStats.forEach((row) => {
+        rows.push([
+          'CategoryStats',
+          categoryLabel[row.category] || row.category,
+          row.activeSubscriptions,
+          row.pendingRequests,
+          row.approvalsToday,
+          row.renewalsToday,
+          generatedAt.toISOString(),
+        ]);
+
+        totals.activeSubscriptions += Number(row.activeSubscriptions || 0);
+        totals.pendingRequests += Number(row.pendingRequests || 0);
+        totals.approvalsToday += Number(row.approvalsToday || 0);
+        totals.renewalsToday += Number(row.renewalsToday || 0);
+      });
+
+      rows.push([
+        'Totals',
+        'All Categories',
+        totals.activeSubscriptions,
+        totals.pendingRequests,
+        totals.approvalsToday,
+        totals.renewalsToday,
+        generatedAt.toISOString(),
+      ]);
+
+      const csv = rows.map(toCsvRow).join('\n');
+      const fileName = `category_stats_${generatedAt.toISOString().slice(0, 10)}.csv`;
+
+      await ctx.replyWithDocument(
+        {
+          source: Buffer.from(csv, 'utf8'),
+          filename: fileName,
+        },
+        {
+          caption: '📄 Category-wise stats CSV generated.',
+        }
+      );
+    } catch (err) {
+      logger.error(`categorystats error: ${err.message}`);
+      await ctx.reply('❌ Failed to generate category-wise stats CSV.');
     }
   });
 

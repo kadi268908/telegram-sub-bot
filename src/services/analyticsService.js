@@ -30,6 +30,95 @@ const getGrowthStats = async () => {
 };
 
 /**
+ * Category-wise snapshot for subscriptions/requests
+ */
+const getCategoryWiseStats = async () => {
+  const today = startOfToday();
+  const todayEnd = endOfToday();
+  const categories = ['movie', 'desi', 'non_desi', 'movie_desi', 'movie_non_desi', 'general'];
+
+  const [activeSubscriptionsRaw, pendingRequestsRaw, approvalsTodayRaw, renewalsTodayRaw] = await Promise.all([
+    Subscription.aggregate([
+      {
+        $match: {
+          status: 'active',
+          expiryDate: { $gt: new Date() },
+        },
+      },
+      {
+        $group: {
+          _id: '$planCategory',
+          count: { $sum: 1 },
+        },
+      },
+    ]),
+    Request.aggregate([
+      {
+        $match: {
+          status: 'pending',
+        },
+      },
+      {
+        $group: {
+          _id: '$requestCategory',
+          count: { $sum: 1 },
+        },
+      },
+    ]),
+    Request.aggregate([
+      {
+        $match: {
+          status: 'approved',
+          actionDate: { $gte: today, $lte: todayEnd },
+        },
+      },
+      {
+        $group: {
+          _id: '$requestCategory',
+          count: { $sum: 1 },
+        },
+      },
+    ]),
+    Subscription.aggregate([
+      {
+        $match: {
+          isRenewal: true,
+          createdAt: { $gte: today, $lte: todayEnd },
+        },
+      },
+      {
+        $group: {
+          _id: '$planCategory',
+          count: { $sum: 1 },
+        },
+      },
+    ]),
+  ]);
+
+  const toCountMap = (rows) => {
+    const map = {};
+    rows.forEach((row) => {
+      const key = row?._id || 'general';
+      map[key] = Number(row?.count || 0);
+    });
+    return map;
+  };
+
+  const activeMap = toCountMap(activeSubscriptionsRaw);
+  const pendingMap = toCountMap(pendingRequestsRaw);
+  const approvalsTodayMap = toCountMap(approvalsTodayRaw);
+  const renewalsTodayMap = toCountMap(renewalsTodayRaw);
+
+  return categories.map((category) => ({
+    category,
+    activeSubscriptions: activeMap[category] || 0,
+    pendingRequests: pendingMap[category] || 0,
+    approvalsToday: approvalsTodayMap[category] || 0,
+    renewalsToday: renewalsTodayMap[category] || 0,
+  }));
+};
+
+/**
  * Plan performance: active user count per plan
  */
 const getPlanPerformance = async () => {
@@ -94,6 +183,7 @@ const incrementSummaryField = async (field, amount = 1) => {
 
 module.exports = {
   getGrowthStats,
+  getCategoryWiseStats,
   getPlanPerformance,
   buildDailySummary,
   incrementSummaryField,
