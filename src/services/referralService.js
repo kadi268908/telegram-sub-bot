@@ -356,7 +356,10 @@ const approveSellerWithdrawal = async (requestId, adminTelegramId) => {
           telegramId: latest.sellerTelegramId,
           'sellerStats.availableBalance': { $gte: latest.amount },
         },
-        { $inc: { 'sellerStats.availableBalance': -latest.amount } },
+        {
+          $inc: { 'sellerStats.availableBalance': -latest.amount },
+          $set: { 'sellerStats.qualifiedReferrals': 0 },
+        },
         { new: true, session }
       );
 
@@ -395,12 +398,21 @@ const approveSellerWithdrawal = async (requestId, adminTelegramId) => {
       );
     }
 
+    const latestSeller = await User.findOne(
+      { telegramId: latest.sellerTelegramId },
+      { 'sellerStats.qualifiedReferrals': 1 }
+    ).lean();
+    const previousQualifiedReferrals = Number(latestSeller?.sellerStats?.qualifiedReferrals || 0);
+
     const seller = await User.findOneAndUpdate(
       {
         telegramId: latest.sellerTelegramId,
         'sellerStats.availableBalance': { $gte: latest.amount },
       },
-      { $inc: { 'sellerStats.availableBalance': -latest.amount } },
+      {
+        $inc: { 'sellerStats.availableBalance': -latest.amount },
+        $set: { 'sellerStats.qualifiedReferrals': 0 },
+      },
       { new: true }
     );
     if (!seller) {
@@ -422,7 +434,10 @@ const approveSellerWithdrawal = async (requestId, adminTelegramId) => {
     if (!marked) {
       await User.findOneAndUpdate(
         { telegramId: latest.sellerTelegramId },
-        { $inc: { 'sellerStats.availableBalance': latest.amount } }
+        {
+          $inc: { 'sellerStats.availableBalance': latest.amount },
+          $set: { 'sellerStats.qualifiedReferrals': previousQualifiedReferrals },
+        }
       );
       throw new Error('Withdrawal request already processed.');
     }
