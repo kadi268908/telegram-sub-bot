@@ -578,6 +578,8 @@ const registerUserHandlers = (bot) => {
         'meta.latestPaymentProof': '',
         'meta.paymentProofReadyForCategory': '',
         'meta.paymentCategory': '',
+        'meta.paymentFlowType': '',
+        'meta.renewalPlanId': '',
       },
     });
 
@@ -1604,7 +1606,7 @@ const registerUserHandlers = (bot) => {
       { telegramId: ctx.from.id },
       {
         $set: {
-          'meta.awaitingPaymentScreenshot': false,
+          'meta.awaitingPaymentScreenshot': true,
           'meta.paymentProofReadyForCategory': category,
           'meta.latestPaymentProof': {
             fileId,
@@ -1618,18 +1620,43 @@ const registerUserHandlers = (bot) => {
       }
     );
 
+    await submitPremiumRequest(ctx, category);
+    return;
+  };
+
+  const maybePromptCheckPlansBeforeScreenshot = async (ctx) => {
+    if (ctx.chat?.type !== 'private') return false;
+
+    const userId = ctx.from?.id;
+    if (!userId) return false;
+
+    const userDoc = await User.findOne({ telegramId: userId });
+    if (userDoc?.meta?.awaitingPaymentScreenshot) return false;
+
+    const isAwaitingSupport = userDoc?.meta?.awaitingSupport === true;
+    if (isAwaitingSupport) return false;
+
+    const activeTicket = await getActiveTicket(userId);
+    if (activeTicket) return false;
+
     await ctx.reply(
-      `✅ Appka payment Screenshot receive ho gaya hai.\n\n` +
-      `Aapne jis plan k liye payment kiya hai uska category *${escapeMarkdown(categoryLabel)}* pe tap karein.\n\n`,
+      `⚠️ Screenshot upload karne se pehle *Check Plans* me category select karein.\n\n` +
+      `Flow: *Check Plans* → category choose karein → *Paid* dabayein → screenshot upload karein.`,
       {
         parse_mode: 'Markdown',
-        ...premiumSelectionKeyboard(),
+        ...Markup.inlineKeyboard([
+          [withStyle(Markup.button.callback('📋 Check Plans', 'check_plans'), 'success')],
+          [withStyle(Markup.button.callback('🏠 Main Menu', 'back_to_main'), 'primary')],
+        ]),
       }
     );
+
+    return true;
   };
 
   bot.on('photo', async (ctx, next) => {
     try {
+      if (await maybePromptCheckPlansBeforeScreenshot(ctx)) return next();
       await onPaymentProofReceived(ctx, 'photo');
     } catch (err) {
       logger.error(`payment proof photo handler error: ${err.message}`);
@@ -1642,6 +1669,7 @@ const registerUserHandlers = (bot) => {
     try {
       const mime = String(ctx.message?.document?.mime_type || '').toLowerCase();
       if (!mime.startsWith('image/')) return next();
+      if (await maybePromptCheckPlansBeforeScreenshot(ctx)) return next();
       await onPaymentProofReceived(ctx, 'document');
     } catch (err) {
       logger.error(`payment proof document handler error: ${err.message}`);
