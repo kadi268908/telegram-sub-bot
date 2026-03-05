@@ -12,6 +12,7 @@ const BONUS_DAYS = parseInt(process.env.BONUS_REFERRAL_DAYS) || 3;
 const SELLER_COMMISSION_PERCENT = parseFloat(process.env.SELLER_COMMISSION_PERCENT || '15');
 const SELLER_MIN_WITHDRAW_REFERRALS = parseInt(process.env.SELLER_MIN_WITHDRAW_REFERRALS || '10', 10);
 const SELLER_MIN_WITHDRAW_BALANCE = parseFloat(process.env.SELLER_MIN_WITHDRAW_BALANCE || '200');
+const UPI_ID_REGEX = /^[a-zA-Z0-9._-]{2,}@[a-zA-Z]{2,}$/;
 
 const getSuperAdminIds = () => {
   return String(process.env.SUPER_ADMIN_IDS || process.env.SUPER_ADMIN_ID || '')
@@ -251,10 +252,19 @@ const getSellerProgramSummary = async (telegramId) => {
   };
 };
 
-const requestSellerWithdrawal = async (telegramId) => {
+const requestSellerWithdrawal = async (telegramId, upiIdRaw) => {
   const summary = await getSellerProgramSummary(telegramId);
   if (!summary || !summary.isSeller) {
     throw new Error('Seller program not registered.');
+  }
+
+  const upiId = String(upiIdRaw || '').trim().toLowerCase();
+  if (!upiId) {
+    throw new Error('UPI ID is required for withdrawal request.');
+  }
+
+  if (!UPI_ID_REGEX.test(upiId)) {
+    throw new Error('Invalid UPI ID format. Example: name@bank');
   }
 
   if (!summary.canWithdraw) {
@@ -275,6 +285,7 @@ const requestSellerWithdrawal = async (telegramId) => {
 
   const request = await SellerWithdrawalRequest.create({
     sellerTelegramId: telegramId,
+    upiId,
     amount,
   });
 
@@ -282,7 +293,7 @@ const requestSellerWithdrawal = async (telegramId) => {
     adminId: 0,
     actionType: 'seller_withdraw_request',
     targetUserId: telegramId,
-    details: { requestId: request._id, amount },
+    details: { requestId: request._id, amount, upiId },
   });
 
   return request;

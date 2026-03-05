@@ -6,6 +6,11 @@ const sellerWithdrawalRequestSchema = new mongoose.Schema({
         required: true,
         index: true,
     },
+    upiId: {
+        type: String,
+        trim: true,
+        default: null,
+    },
     amount: {
         type: Number,
         required: true,

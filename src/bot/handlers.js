@@ -266,8 +266,10 @@ const notifySellerWithdrawalRequest = async (bot, ctx, request) => {
     `Seller: *${sellerName}*\n` +
     `Seller ID: \`${request.sellerTelegramId}\`\n` +
     `Username: ${sellerUsername}\n` +
+    `UPI ID: \`${request.upiId}\`\n` +
     `Amount: *₹${Number(request.amount).toFixed(2)}*\n` +
-    `Requested At: ${new Date(request.requestedAt).toLocaleString('en-IN')}`,
+    `Requested At: ${new Date(request.requestedAt).toLocaleString('en-IN')}\n` +
+    `⏱ Processing Time: *Minimum 24 hours*`,
     {
       parse_mode: 'Markdown',
       reply_markup: {
@@ -858,18 +860,33 @@ const registerUserHandlers = (bot) => {
 
   bot.command('seller', showSellerProgram);
 
+  const startSellerWithdrawalUpiFlow = async (ctx) => {
+    await User.findOneAndUpdate(
+      { telegramId: ctx.from.id },
+      {
+        $set: { 'meta.awaitingSellerWithdrawalUpi': true },
+      }
+    );
+
+    await ctx.reply(
+      `💸 *Withdrawal Request*\n\n` +
+      `Payout receive karne ke liye apna UPI ID bhejiye.\n` +
+      `Example: \`name@bank\`\n\n` +
+      `⚠️ Sahi UPI ID bhejein. Request submit hone ke baad process hone me *minimum 24 hours* lag sakte hain.`,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [withStyle(Markup.button.callback('❌ Cancel', 'cancel_seller_withdraw_upi'), 'danger')],
+          [withStyle(Markup.button.callback('🎫 Support Chat', 'open_support'), 'primary')],
+        ]),
+      }
+    );
+  };
+
   bot.action('seller_withdraw', async (ctx) => {
-    await ctx.answerCbQuery('Processing...');
+    await ctx.answerCbQuery('Send your UPI ID');
     try {
-      const req = await requestSellerWithdrawal(ctx.from.id);
-      await notifySellerWithdrawalRequest(bot, ctx, req);
-      await ctx.reply(
-        `✅ *Withdrawal Request Submitted*\n\n` +
-        `Request ID: \`${req._id}\`\n` +
-        `Amount: *₹${Number(req.amount).toFixed(2)}*\n\n` +
-        `Admin review ke baad payout process hoga.`,
-        { parse_mode: 'Markdown' }
-      );
+      await startSellerWithdrawalUpiFlow(ctx);
     } catch (err) {
       await ctx.reply(`⚠️ ${err.message}`);
     }
@@ -877,14 +894,32 @@ const registerUserHandlers = (bot) => {
 
   bot.command('sellerwithdraw', async (ctx) => {
     try {
-      const req = await requestSellerWithdrawal(ctx.from.id);
-      await notifySellerWithdrawalRequest(bot, ctx, req);
-      await ctx.reply(
-        `✅ Withdrawal request created. ID: \`${req._id}\` | Amount: *₹${Number(req.amount).toFixed(2)}*`,
-        { parse_mode: 'Markdown' }
-      );
+      await startSellerWithdrawalUpiFlow(ctx);
     } catch (err) {
       await ctx.reply(`⚠️ ${err.message}`);
+    }
+  });
+
+  bot.action('cancel_seller_withdraw_upi', async (ctx) => {
+    await ctx.answerCbQuery('Cancelled');
+    try {
+      await User.findOneAndUpdate(
+        { telegramId: ctx.from.id },
+        { $unset: { 'meta.awaitingSellerWithdrawalUpi': '' } }
+      );
+
+      await ctx.reply(
+        `✅ Withdrawal request process cancelled.`,
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [withStyle(Markup.button.callback('🛍 Seller Dashboard', 'seller_program'), 'success')],
+            [withStyle(Markup.button.callback('🎫 Support Chat', 'open_support'), 'primary')],
+          ]),
+        }
+      );
+    } catch (err) {
+      await ctx.reply('❌ Unable to cancel right now. Please try again.');
     }
   });
 
@@ -1732,6 +1767,48 @@ const registerUserHandlers = (bot) => {
 
       // Check if user is awaiting support (about to create ticket)
       const userDoc = await User.findOne({ telegramId: userId });
+      if (userDoc?.meta?.awaitingSellerWithdrawalUpi) {
+        const upiId = String(message?.text || '').trim().toLowerCase();
+        if (!upiId) {
+          return ctx.reply('⚠️ UPI ID text me bhejiye. Example: `name@bank`', { parse_mode: 'Markdown' });
+        }
+
+        let req;
+        try {
+          req = await requestSellerWithdrawal(ctx.from.id, upiId);
+        } catch (err) {
+          const errMsg = String(err?.message || 'Unable to create withdrawal request.');
+          if (errMsg.toLowerCase().includes('invalid upi id format')) {
+            return ctx.reply('⚠️ Invalid UPI ID format. Example: `name@bank`', { parse_mode: 'Markdown' });
+          }
+          if (errMsg.toLowerCase().includes('upi id is required')) {
+            return ctx.reply('⚠️ UPI ID required hai. Example: `name@bank`', { parse_mode: 'Markdown' });
+          }
+
+          await User.findOneAndUpdate(
+            { telegramId: userId },
+            { $unset: { 'meta.awaitingSellerWithdrawalUpi': '' } }
+          );
+          return ctx.reply(`⚠️ ${errMsg}`);
+        }
+
+        await User.findOneAndUpdate(
+          { telegramId: userId },
+          { $unset: { 'meta.awaitingSellerWithdrawalUpi': '' } }
+        );
+
+        await notifySellerWithdrawalRequest(bot, ctx, req);
+        await ctx.reply(
+          `✅ *Withdrawal Request Submitted*\n\n` +
+          `Request ID: \`${req._id}\`\n` +
+          `UPI ID: \`${req.upiId}\`\n` +
+          `Amount: *₹${Number(req.amount).toFixed(2)}*\n\n` +
+          `⏱ Withdrawal process hone me *minimum 24 hours* lag sakte hain.`,
+          { parse_mode: 'Markdown' }
+        );
+        return;
+      }
+
       if (userDoc?.meta?.awaitingPaymentScreenshot) {
         if (!message?.text) return next();
         return ctx.reply(

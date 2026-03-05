@@ -433,6 +433,7 @@ const registerSuperAdminHandlers = (bot) => {
     items.forEach((item, i) => {
       msg += `${i + 1}. ID: \`${item._id}\`\n`;
       msg += `   Seller: \`${item.sellerTelegramId}\`\n`;
+      msg += `   UPI: \`${item.upiId || 'N/A'}\`\n`;
       msg += `   Amount: *₹${Number(item.amount).toFixed(2)}*\n`;
       msg += `   Requested: ${new Date(item.requestedAt).toLocaleString('en-IN')}\n\n`;
     });
