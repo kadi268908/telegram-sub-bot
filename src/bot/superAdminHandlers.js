@@ -1256,7 +1256,8 @@ const buildCategoryWiseSalesReportMessages = (title, rows, maxLength = 3500) => 
       items.forEach((row, index) => {
         const price = Number(row.planPrice || 0);
         categoryRevenue += price;
-        section += `${index + 1}. \`${row.telegramId}\` | ${row.planName || 'Plan'} | ₹${price.toFixed(2)}\n`;
+        const safePlanName = escapeTelegramMarkdown(String(row.planName || 'Plan'));
+        section += `${index + 1}. \`${row.telegramId}\` | ${safePlanName} | ₹${price.toFixed(2)}\n`;
       });
     }
 
@@ -1298,6 +1299,10 @@ const chunkMarkdownSections = (sections, maxLength = 3500) => {
   }
 
   return chunks;
+};
+
+const escapeTelegramMarkdown = (value) => {
+  return String(value || '').replace(/([_*\[\]()`])/g, '\\$1');
 };
 
 const parseReportDuration = (token) => {
