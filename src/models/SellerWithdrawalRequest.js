@@ -42,4 +42,13 @@ const sellerWithdrawalRequestSchema = new mongoose.Schema({
     },
 }, { timestamps: true });
 
+sellerWithdrawalRequestSchema.index(
+    { sellerTelegramId: 1, status: 1 },
+    {
+        unique: true,
+        partialFilterExpression: { status: 'pending' },
+        name: 'uniq_pending_withdrawal_per_seller',
+    }
+);
+
 module.exports = mongoose.model('SellerWithdrawalRequest', sellerWithdrawalRequestSchema);

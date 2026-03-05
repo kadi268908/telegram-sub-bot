@@ -12,7 +12,13 @@ const BONUS_DAYS = parseInt(process.env.BONUS_REFERRAL_DAYS) || 3;
 const SELLER_COMMISSION_PERCENT = parseFloat(process.env.SELLER_COMMISSION_PERCENT || '15');
 const SELLER_MIN_WITHDRAW_REFERRALS = parseInt(process.env.SELLER_MIN_WITHDRAW_REFERRALS || '10', 10);
 const SELLER_MIN_WITHDRAW_BALANCE = parseFloat(process.env.SELLER_MIN_WITHDRAW_BALANCE || '200');
+const SELLER_WITHDRAW_MIN_PROCESS_HOURS = parseInt(process.env.SELLER_WITHDRAW_MIN_PROCESS_HOURS || '24', 10);
 const UPI_ID_REGEX = /^[a-zA-Z0-9._-]{2,}@[a-zA-Z]{2,}$/;
+
+const getWithdrawalApprovalAllowedAt = (requestedAt) => {
+  const hours = Number.isFinite(SELLER_WITHDRAW_MIN_PROCESS_HOURS) ? SELLER_WITHDRAW_MIN_PROCESS_HOURS : 24;
+  return new Date(new Date(requestedAt).getTime() + Math.max(0, hours) * 60 * 60 * 1000);
+};
 
 const getSuperAdminIds = () => {
   return String(process.env.SUPER_ADMIN_IDS || process.env.SUPER_ADMIN_ID || '')
@@ -283,11 +289,19 @@ const requestSellerWithdrawal = async (telegramId, upiIdRaw) => {
     throw new Error('Available balance is zero.');
   }
 
-  const request = await SellerWithdrawalRequest.create({
-    sellerTelegramId: telegramId,
-    upiId,
-    amount,
-  });
+  let request;
+  try {
+    request = await SellerWithdrawalRequest.create({
+      sellerTelegramId: telegramId,
+      upiId,
+      amount,
+    });
+  } catch (err) {
+    if (err?.code === 11000) {
+      throw new Error('You already have a pending withdrawal request.');
+    }
+    throw err;
+  }
 
   await AdminLog.create({
     adminId: 0,
@@ -312,24 +326,120 @@ const approveSellerWithdrawal = async (requestId, adminTelegramId) => {
   if (!request) throw new Error('Withdrawal request not found.');
   if (request.status !== 'pending') throw new Error('Withdrawal request already processed.');
 
-  await User.findOneAndUpdate(
-    { telegramId: request.sellerTelegramId },
-    { $inc: { 'sellerStats.availableBalance': -request.amount } }
-  );
+  const allowedAt = getWithdrawalApprovalAllowedAt(request.requestedAt);
+  if (Date.now() < allowedAt.getTime()) {
+    throw new Error(
+      `Withdrawal approval allowed after ${allowedAt.toLocaleString('en-IN')} (minimum ${SELLER_WITHDRAW_MIN_PROCESS_HOURS} hours).`
+    );
+  }
 
-  request.status = 'approved';
-  request.reviewedAt = new Date();
-  request.reviewedBy = adminTelegramId;
-  await request.save();
+  const mongoose = require('mongoose');
+  const session = await mongoose.startSession();
+  let approvedRequest;
+  const transactionUnsupportedMessage = 'Transaction numbers are only allowed on a replica set member or mongos';
 
-  await AdminLog.create({
-    adminId: adminTelegramId,
-    actionType: 'seller_withdraw_approve',
-    targetUserId: request.sellerTelegramId,
-    details: { requestId: request._id, amount: request.amount },
-  });
+  try {
+    await session.withTransaction(async () => {
+      const latest = await SellerWithdrawalRequest.findById(requestId).session(session);
+      if (!latest) throw new Error('Withdrawal request not found.');
+      if (latest.status !== 'pending') throw new Error('Withdrawal request already processed.');
 
-  return request;
+      const latestAllowedAt = getWithdrawalApprovalAllowedAt(latest.requestedAt);
+      if (Date.now() < latestAllowedAt.getTime()) {
+        throw new Error(
+          `Withdrawal approval allowed after ${latestAllowedAt.toLocaleString('en-IN')} (minimum ${SELLER_WITHDRAW_MIN_PROCESS_HOURS} hours).`
+        );
+      }
+
+      const seller = await User.findOneAndUpdate(
+        {
+          telegramId: latest.sellerTelegramId,
+          'sellerStats.availableBalance': { $gte: latest.amount },
+        },
+        { $inc: { 'sellerStats.availableBalance': -latest.amount } },
+        { new: true, session }
+      );
+
+      if (!seller) {
+        throw new Error('Insufficient available balance for this withdrawal request.');
+      }
+
+      latest.status = 'approved';
+      latest.reviewedAt = new Date();
+      latest.reviewedBy = adminTelegramId;
+      await latest.save({ session });
+
+      await AdminLog.create([{
+        adminId: adminTelegramId,
+        actionType: 'seller_withdraw_approve',
+        targetUserId: latest.sellerTelegramId,
+        details: { requestId: latest._id, amount: latest.amount, upiId: latest.upiId || null },
+      }], { session });
+
+      approvedRequest = latest;
+    });
+  } catch (err) {
+    const message = String(err?.message || '');
+    if (!message.includes(transactionUnsupportedMessage)) {
+      throw err;
+    }
+
+    const latest = await SellerWithdrawalRequest.findById(requestId);
+    if (!latest) throw new Error('Withdrawal request not found.');
+    if (latest.status !== 'pending') throw new Error('Withdrawal request already processed.');
+
+    const latestAllowedAt = getWithdrawalApprovalAllowedAt(latest.requestedAt);
+    if (Date.now() < latestAllowedAt.getTime()) {
+      throw new Error(
+        `Withdrawal approval allowed after ${latestAllowedAt.toLocaleString('en-IN')} (minimum ${SELLER_WITHDRAW_MIN_PROCESS_HOURS} hours).`
+      );
+    }
+
+    const seller = await User.findOneAndUpdate(
+      {
+        telegramId: latest.sellerTelegramId,
+        'sellerStats.availableBalance': { $gte: latest.amount },
+      },
+      { $inc: { 'sellerStats.availableBalance': -latest.amount } },
+      { new: true }
+    );
+    if (!seller) {
+      throw new Error('Insufficient available balance for this withdrawal request.');
+    }
+
+    const marked = await SellerWithdrawalRequest.findOneAndUpdate(
+      { _id: latest._id, status: 'pending' },
+      {
+        $set: {
+          status: 'approved',
+          reviewedAt: new Date(),
+          reviewedBy: adminTelegramId,
+        },
+      },
+      { new: true }
+    );
+
+    if (!marked) {
+      await User.findOneAndUpdate(
+        { telegramId: latest.sellerTelegramId },
+        { $inc: { 'sellerStats.availableBalance': latest.amount } }
+      );
+      throw new Error('Withdrawal request already processed.');
+    }
+
+    await AdminLog.create({
+      adminId: adminTelegramId,
+      actionType: 'seller_withdraw_approve',
+      targetUserId: marked.sellerTelegramId,
+      details: { requestId: marked._id, amount: marked.amount, upiId: marked.upiId || null },
+    });
+
+    approvedRequest = marked;
+  } finally {
+    await session.endSession();
+  }
+
+  return approvedRequest;
 };
 
 const rejectSellerWithdrawal = async (requestId, adminTelegramId, note = '') => {
