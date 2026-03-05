@@ -25,7 +25,7 @@ const { getGroupIdForCategory, normalizePlanCategory } = require('../utils/premi
 const logger = require('../utils/logger');
 
 const CRON_TIMEZONE = process.env.CRON_TIMEZONE || 'Asia/Kolkata';
-const REMINDER_CRON_SCHEDULES = (process.env.REMINDER_CRON_SCHEDULES || '15 9 * * *,0 20 * * *')
+const REMINDER_CRON_SCHEDULES = (process.env.REMINDER_CRON_SCHEDULES || '15 9 * * *,0 20 * * *,15 23 * * *')
   .split(',')
   .map((schedule) => schedule.trim())
   .filter(Boolean);
