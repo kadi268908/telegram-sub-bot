@@ -116,6 +116,37 @@ const getSalesReport = async (startDate, endDate) => {
   ]);
 };
 
+const getSalesUserBreakdown = async (startDate, endDate) => {
+  return Subscription.aggregate([
+    {
+      $match: {
+        createdAt: { $gte: startDate, $lte: endDate },
+        status: { $in: ['active', 'expired'] },
+      },
+    },
+    {
+      $lookup: {
+        from: 'plans',
+        localField: 'planId',
+        foreignField: '_id',
+        as: 'plan',
+      },
+    },
+    { $unwind: { path: '$plan', preserveNullAndEmptyArrays: true } },
+    {
+      $project: {
+        _id: 0,
+        telegramId: 1,
+        planCategory: 1,
+        planName: 1,
+        planPrice: { $ifNull: ['$plan.price', 0] },
+        createdAt: 1,
+      },
+    },
+    { $sort: { createdAt: -1 } },
+  ]);
+};
+
 const getTodayExpiryList = async () => {
   return Subscription.find({
     status: 'active',
@@ -129,6 +160,7 @@ module.exports = {
   getSubscriptionsExpiringSoon,
   getExpiredUnprocessed,
   getSalesReport,
+  getSalesUserBreakdown,
   getTodayExpiryList,
   startOfToday,
   endOfToday,

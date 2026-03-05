@@ -13,7 +13,7 @@ const {
   addAdmin, removeAdmin, createPlan, updatePlan, deletePlan,
   getAllPlans, getActivePlans, createOffer, deleteOffer, getActiveOffers
 } = require('../services/adminService');
-const { getSalesReport, getTodayExpiryList } = require('../services/subscriptionService');
+const { getSalesReport, getSalesUserBreakdown, getTodayExpiryList } = require('../services/subscriptionService');
 const { getGrowthStats, getCategoryWiseStats, getPlanPerformance } = require('../services/analyticsService');
 const {
   getSellerWithdrawalRequests,
@@ -265,7 +265,33 @@ const registerSuperAdminHandlers = (bot) => {
     try {
       let message = '';
       if (type === 'daily') {
-        message = formatSalesReport('📅 Daily Sales', await getSalesReport(startOfToday(), endOfToday()));
+        const start = startOfToday();
+        const end = endOfToday();
+        const [summary, userRows] = await Promise.all([
+          getSalesReport(start, end),
+          getSalesUserBreakdown(start, end),
+        ]);
+
+        message = formatSalesReport('📅 Daily Sales', summary);
+        await ctx.reply(message, { parse_mode: 'Markdown' });
+
+        const userListHeader = '📄 *Daily Sales User List*\nFormat: `UserId | Category | Plan Price`\n\n';
+        if (!userRows.length) {
+          await ctx.reply(`${userListHeader}No sales found for today.`, { parse_mode: 'Markdown' });
+          return;
+        }
+
+        const lines = userRows.map((row, index) => {
+          const category = String(row.planCategory || 'general').replace(/_/g, '-');
+          const price = Number(row.planPrice || 0).toFixed(2);
+          return `${index + 1}. \`${row.telegramId}\` | ${category} | ₹${price}`;
+        });
+
+        const chunks = buildMarkdownChunks(userListHeader, lines, 3500);
+        for (const chunk of chunks) {
+          await ctx.reply(chunk, { parse_mode: 'Markdown' });
+        }
+        return;
       } else if (type === 'weekly') {
         message = formatSalesReport('📆 Weekly Sales', await getSalesReport(startOfWeek(), new Date()));
       } else if (type === 'monthly') {
@@ -1182,6 +1208,26 @@ const formatSalesReport = (title, data) => {
   });
   msg += `\n📊 Total: ${totalSubs} — ₹${totalRevenue.toFixed(2)}`;
   return msg;
+};
+
+const buildMarkdownChunks = (header, lines, maxLength = 3500) => {
+  const chunks = [];
+  let current = header;
+
+  lines.forEach((line) => {
+    const next = `${current}${line}\n`;
+    if (next.length > maxLength && current !== header) {
+      chunks.push(current.trimEnd());
+      current = `${header}${line}\n`;
+    } else {
+      current = next;
+    }
+  });
+
+  if (current.trim()) {
+    chunks.push(current.trimEnd());
+  }
+  return chunks;
 };
 
 const parseReportDuration = (token) => {
