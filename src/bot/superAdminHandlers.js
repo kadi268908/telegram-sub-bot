@@ -264,38 +264,27 @@ const registerSuperAdminHandlers = (bot) => {
     const type = ctx.match[1];
     try {
       let message = '';
-      if (type === 'daily') {
-        const start = startOfToday();
-        const end = endOfToday();
-        const [summary, userRows] = await Promise.all([
-          getSalesReport(start, end),
-          getSalesUserBreakdown(start, end),
-        ]);
+      if (type === 'daily' || type === 'weekly' || type === 'monthly') {
+        let start = startOfToday();
+        let end = endOfToday();
+        let title = 'Daily Sales Report';
 
-        message = formatSalesReport('📅 Daily Sales', summary);
-        await ctx.reply(message, { parse_mode: 'Markdown' });
-
-        const userListHeader = '📄 *Daily Sales User List*\nFormat: `UserId | Category | Plan Price`\n\n';
-        if (!userRows.length) {
-          await ctx.reply(`${userListHeader}No sales found for today.`, { parse_mode: 'Markdown' });
-          return;
+        if (type === 'weekly') {
+          start = startOfWeek();
+          end = new Date();
+          title = 'Weekly Sales Report';
+        } else if (type === 'monthly') {
+          start = startOfMonth();
+          end = new Date();
+          title = 'Monthly Sales Report';
         }
 
-        const lines = userRows.map((row, index) => {
-          const category = String(row.planCategory || 'general').replace(/_/g, '-');
-          const price = Number(row.planPrice || 0).toFixed(2);
-          return `${index + 1}. \`${row.telegramId}\` | ${category} | ₹${price}`;
-        });
-
-        const chunks = buildMarkdownChunks(userListHeader, lines, 3500);
+        const userRows = await getSalesUserBreakdown(start, end);
+        const chunks = buildCategoryWiseSalesReportMessages(title, userRows, 3500);
         for (const chunk of chunks) {
           await ctx.reply(chunk, { parse_mode: 'Markdown' });
         }
         return;
-      } else if (type === 'weekly') {
-        message = formatSalesReport('📆 Weekly Sales', await getSalesReport(startOfWeek(), new Date()));
-      } else if (type === 'monthly') {
-        message = formatSalesReport('🗓 Monthly Sales', await getSalesReport(startOfMonth(), new Date()));
       } else if (type === 'expiry') {
         const list = await getTodayExpiryList();
         message = `📋 *Today's Expiry List* (${list.length})\n\n`;
@@ -1227,6 +1216,87 @@ const buildMarkdownChunks = (header, lines, maxLength = 3500) => {
   if (current.trim()) {
     chunks.push(current.trimEnd());
   }
+  return chunks;
+};
+
+const buildCategoryWiseSalesReportMessages = (title, rows, maxLength = 3500) => {
+  const categoryOrder = ['movie', 'desi', 'non_desi', 'movie_desi', 'movie_non_desi', 'general'];
+  const categoryLabel = {
+    movie: 'Movie',
+    desi: 'Desi',
+    non_desi: 'Non-Desi',
+    movie_desi: 'Movie + Desi',
+    movie_non_desi: 'Movie + Non-Desi',
+    general: 'General',
+  };
+
+  const grouped = {};
+  categoryOrder.forEach((key) => {
+    grouped[key] = [];
+  });
+
+  rows.forEach((row) => {
+    const key = categoryOrder.includes(row.planCategory) ? row.planCategory : 'general';
+    grouped[key].push(row);
+  });
+
+  const sections = [`📊 *${title}*`];
+  let grandCount = 0;
+  let grandRevenue = 0;
+  const categorySummaries = [];
+
+  categoryOrder.forEach((key) => {
+    const items = grouped[key] || [];
+    let categoryRevenue = 0;
+    let section = `\n*${categoryLabel[key]} List*\n`;
+
+    if (!items.length) {
+      section += '_No sales_\n';
+    } else {
+      items.forEach((row, index) => {
+        const price = Number(row.planPrice || 0);
+        categoryRevenue += price;
+        section += `${index + 1}. \`${row.telegramId}\` | ${row.planName || 'Plan'} | ₹${price.toFixed(2)}\n`;
+      });
+    }
+
+    section += `Subtotal: *${items.length}* sales | *₹${categoryRevenue.toFixed(2)}*\n`;
+    sections.push(section.trimEnd());
+
+    grandCount += items.length;
+    grandRevenue += categoryRevenue;
+    categorySummaries.push({ key, count: items.length, revenue: categoryRevenue });
+  });
+
+  let summarySection = '\n*Summary*\n';
+  categorySummaries.forEach((row) => {
+    summarySection += `${categoryLabel[row.key]}: *${row.count}* sales | *₹${row.revenue.toFixed(2)}*\n`;
+  });
+  summarySection += `\nTotal Sales: *${grandCount}*\n`;
+  summarySection += `Total Revenue: *₹${grandRevenue.toFixed(2)}*`;
+  sections.push(summarySection.trimEnd());
+
+  return chunkMarkdownSections(sections, maxLength);
+};
+
+const chunkMarkdownSections = (sections, maxLength = 3500) => {
+  const chunks = [];
+  let current = '';
+
+  sections.forEach((section) => {
+    const block = `${section}\n\n`;
+    if ((current + block).length > maxLength && current.length > 0) {
+      chunks.push(current.trimEnd());
+      current = block;
+    } else {
+      current += block;
+    }
+  });
+
+  if (current.trim()) {
+    chunks.push(current.trimEnd());
+  }
+
   return chunks;
 };
 
