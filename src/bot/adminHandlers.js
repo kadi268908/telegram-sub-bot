@@ -303,8 +303,7 @@ const registerAdminHandlers = (bot) => {
     if (ctx.from?.is_bot) return next();
 
     // Skip commands
-    const text = ctx.message?.text || ctx.message?.caption;
-    if (!text || text.startsWith('/')) return next();
+    if (String(ctx.message?.text || '').startsWith('/')) return next();
 
     try {
       // Find which ticket this topic belongs to
@@ -318,7 +317,7 @@ const registerAdminHandlers = (bot) => {
       const adminName = adminUser.username ? `@${adminUser.username}` : adminUser.name;
 
       // Forward the reply to user's DM
-      await forwardAdminReply(bot, ticket, adminName, text);
+      await forwardAdminReply(bot, ticket, adminName, ctx.message);
 
       // React with a checkmark in the topic to confirm delivery
       await ctx.react('✅').catch(() => { });

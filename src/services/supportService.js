@@ -15,6 +15,40 @@ const logger = require('../utils/logger');
 const SUPPORT_CONTACT = process.env.SUPPORT_CONTACT || '@ImaxSupport1Bot';
 const SUPPORT_GROUP_ID = process.env.SUPPORT_GROUP_ID;
 
+const describeMessage = (message) => {
+  if (!message) return 'No message content';
+
+  const text = String(message.text || message.caption || '').trim();
+  if (text) return text;
+
+  if (Array.isArray(message.photo) && message.photo.length) return '[Photo]';
+  if (message.video) return '[Video]';
+  if (message.document) return '[Document]';
+  if (message.audio) return '[Audio]';
+  if (message.voice) return '[Voice message]';
+  if (message.video_note) return '[Video note]';
+  if (message.sticker) return '[Sticker]';
+  if (message.animation) return '[GIF]';
+  if (message.location) return '[Location]';
+  if (message.contact) return '[Contact]';
+  if (message.poll) return '[Poll]';
+
+  return '[Unsupported message type]';
+};
+
+const copyMessageSafe = async (bot, toChatId, fromChatId, messageId, extra = {}) => {
+  try {
+    await bot.telegram.copyMessage(toChatId, fromChatId, messageId, {
+      protect_content: true,
+      ...extra,
+    });
+    return true;
+  } catch (err) {
+    logger.warn(`copyMessage failed (${fromChatId} -> ${toChatId}): ${err.message}`);
+    return false;
+  }
+};
+
 // Today as YYYY-MM-DD
 const todayStr = () => new Date().toISOString().slice(0, 10);
 
@@ -35,7 +69,7 @@ const getTicketByTopicId = async (topicId) => {
 /**
  * Create a new forum topic + ticket record.
  */
-const openTicket = async (bot, user, firstMessage) => {
+const openTicket = async (bot, user, firstMessage, sourceMessage = null) => {
   // Create a forum topic named after the user
   const topicName = `${user.name} · ${user.telegramId}`;
   const topic = await bot.telegram.createForumTopic(SUPPORT_GROUP_ID, topicName, {
@@ -64,6 +98,16 @@ const openTicket = async (bot, user, firstMessage) => {
     }
   );
 
+  if (sourceMessage?.message_id && sourceMessage?.chat?.id) {
+    await copyMessageSafe(
+      bot,
+      SUPPORT_GROUP_ID,
+      sourceMessage.chat.id,
+      sourceMessage.message_id,
+      { message_thread_id: topic.message_thread_id }
+    );
+  }
+
   // Save ticket record
   const ticket = new SupportTicket({
     telegramId: user.telegramId,
@@ -83,11 +127,25 @@ const openTicket = async (bot, user, firstMessage) => {
 /**
  * Forward a user's follow-up message into their open topic thread.
  */
-const forwardUserMessage = async (bot, ticket, user, text) => {
+const forwardUserMessage = async (bot, ticket, user, payload) => {
   const userTag = user.username ? `@${user.username}` : `User ${user.telegramId}`;
+
+  if (payload?.message_id && payload?.chat?.id) {
+    const copied = await copyMessageSafe(
+      bot,
+      SUPPORT_GROUP_ID,
+      payload.chat.id,
+      payload.message_id,
+      { message_thread_id: ticket.topicId }
+    );
+
+    if (copied) return;
+  }
+
+  const fallbackText = typeof payload === 'string' ? payload : describeMessage(payload);
   await bot.telegram.sendMessage(
     SUPPORT_GROUP_ID,
-    `💬 *${userTag}:*\n${text}`,
+    `💬 *${userTag}:*\n${fallbackText}`,
     {
       message_thread_id: ticket.topicId,
       parse_mode: 'Markdown',
@@ -99,12 +157,35 @@ const forwardUserMessage = async (bot, ticket, user, text) => {
  * Forward an admin's topic reply back to the user's DM.
  * Called when bot detects a message in the support group thread.
  */
-const forwardAdminReply = async (bot, ticket, adminName, text) => {
+const forwardAdminReply = async (bot, ticket, adminName, payload) => {
   const { safeSend } = require('../utils/telegramUtils');
+
+  const message = typeof payload === 'string' ? null : payload;
+
+  if (message?.message_id && message?.chat?.id) {
+    const copied = await copyMessageSafe(
+      bot,
+      ticket.telegramId,
+      message.chat.id,
+      message.message_id
+    );
+
+    if (copied) {
+      await AdminLog.create({
+        adminId: 0,
+        actionType: 'support_reply',
+        targetUserId: ticket.telegramId,
+        details: { ticketId: ticket.ticketId, reply: describeMessage(message).substring(0, 100), adminName },
+      });
+      return;
+    }
+  }
+
+  const fallbackText = typeof payload === 'string' ? payload : describeMessage(payload);
   await safeSend(
     bot,
     ticket.telegramId,
-    `💬 *Support Team:*\n\n${text}`,
+    `💬 *Support Team:*\n\n${fallbackText}`,
     { parse_mode: 'Markdown' }
   );
 
@@ -112,7 +193,7 @@ const forwardAdminReply = async (bot, ticket, adminName, text) => {
     adminId: 0,
     actionType: 'support_reply',
     targetUserId: ticket.telegramId,
-    details: { ticketId: ticket.ticketId, reply: text.substring(0, 100) },
+    details: { ticketId: ticket.ticketId, reply: fallbackText.substring(0, 100), adminName },
   });
 };
 

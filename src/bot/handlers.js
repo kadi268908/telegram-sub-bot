@@ -1359,7 +1359,7 @@ const registerUserHandlers = (bot) => {
         return ctx.reply(
           `💬 *Support Chat pehle se chalu hai*\n\n` +
           `Ticket: \`${existing.ticketId}\`\n\n` +
-          `Apna message type kijiye — hamari tem jald hin reply karegi.\n\n` +
+          `Apna message bhejiye (text/photo/video/document/audio/link) — hamari team jald reply karegi.\n\n` +
           `📌 Support chat close karne ke liye niche button use kijiye.`,
           {
             parse_mode: 'Markdown',
@@ -1380,7 +1380,7 @@ const registerUserHandlers = (bot) => {
 
         `━━━━━━━━━━━━━━━━\n` +
         `📌 *Tips for faster help:*\n` +
-        `• Apna samasya ko detail me likh k bhejen.\n` +
+        `• Text, photo, video, document, audio ya link — kuch bhi bhej sakte hain.\n` +
         `• Hamari support team jald hin reply karegi.\n` +
         `━━━━━━━━━━━━━━━━\n\n` +
         `Chat ko close karne ke liye niche button use kijiye!`,
@@ -1620,9 +1620,7 @@ const registerUserHandlers = (bot) => {
 
     await ctx.reply(
       `✅ Appka payment Screenshot receive ho gaya hai.\n\n` +
-      `Aapne jis plan k liye payment kiya hai uska category *${escapeMarkdown(categoryLabel)}* pe tap karein.\n\n` +
-      `Hamari team jald hi aapke screenshot ko verify karegi aur Joining link bhejegi.\n\n` +
-      `Kripya intejaar karein.`,
+      `Aapne jis plan k liye payment kiya hai uska category *${escapeMarkdown(categoryLabel)}* pe tap karein.\n\n`,
       {
         parse_mode: 'Markdown',
         ...premiumSelectionKeyboard(),
@@ -1687,16 +1685,17 @@ const registerUserHandlers = (bot) => {
     await closeSupportChat(ctx);
   });
 
-  // ── Text handler: intercept user messages for active support chats ─────────
-  bot.on('text', async (ctx, next) => {
+  // ── Message handler: intercept user messages for active support chats ──────
+  bot.on('message', async (ctx, next) => {
     // Only process private messages (not group messages)
     if (ctx.chat.type !== 'private') return next();
 
     const userId = ctx.from.id;
-    const text = ctx.message.text;
+    const message = ctx.message;
+    const text = String(message?.text || message?.caption || '').trim();
 
     // Skip commands
-    if (text.startsWith('/')) return next();
+    if (String(message?.text || '').startsWith('/')) return next();
 
     await User.findOneAndUpdate({ telegramId: userId }, { lastInteraction: new Date() }).catch(() => { });
 
@@ -1706,6 +1705,7 @@ const registerUserHandlers = (bot) => {
       // Check if user is awaiting support (about to create ticket)
       const userDoc = await User.findOne({ telegramId: userId });
       if (userDoc?.meta?.awaitingPaymentScreenshot) {
+        if (!message?.text) return next();
         return ctx.reply(
           `📸 Aap payment screenshot upload mode me hain.\n\n` +
           `Kripya screenshot as photo/document bhejiye ya cancel karein.`,
@@ -1725,6 +1725,7 @@ const registerUserHandlers = (bot) => {
       const activeTicket = await getActiveTicket(userId);
 
       if (!isAwaiting && !activeTicket) {
+        if (!message?.text) return next();
         const matchedFilter = await findMatchedDmFilter(text);
         if (!matchedFilter) return next();
 
@@ -1738,7 +1739,7 @@ const registerUserHandlers = (bot) => {
         await User.findOneAndUpdate({ telegramId: userId }, { $unset: { 'meta.awaitingSupport': '' } });
 
         let ticket;
-        ticket = await openTicket(bot, user, text);
+        ticket = await openTicket(bot, user, text || '[Media message]', message);
 
         await ctx.reply(
           `✅ *Support Chat Connected!*\n\n` +
@@ -1756,7 +1757,7 @@ const registerUserHandlers = (bot) => {
         if (isAwaiting) {
           await User.findOneAndUpdate({ telegramId: userId }, { $unset: { 'meta.awaitingSupport': '' } });
         }
-        await forwardUserMessage(bot, activeTicket, user, text);
+        await forwardUserMessage(bot, activeTicket, user, message);
         // Small confirmation tick so user knows message was delivered
         await ctx.react('👍').catch(() => { }); // reaction if supported, else silent
       }
