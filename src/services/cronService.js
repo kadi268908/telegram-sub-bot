@@ -6,6 +6,7 @@
 //   membershipMonitor    - resend invite / ban mismatched users
 //   dailySummary         - nightly channel report at 23:59
 //   offerExpiryChecker   - deactivate expired offers
+//   pendingRequestReminderJob - remind users whose request is still pending
 
 const cron = require('node-cron');
 const fs = require('fs/promises');
@@ -28,6 +29,21 @@ const REMINDER_CRON_SCHEDULES = (process.env.REMINDER_CRON_SCHEDULES || '15 9 * 
   .split(',')
   .map((schedule) => schedule.trim())
   .filter(Boolean);
+const PENDING_REQUEST_REMINDER_AFTER_HOURS = Math.max(1, parseInt(process.env.PENDING_REQUEST_REMINDER_AFTER_HOURS || '2', 10));
+const PENDING_REQUEST_REMINDER_REPEAT_HOURS = Math.max(1, parseInt(process.env.PENDING_REQUEST_REMINDER_REPEAT_HOURS || '12', 10));
+
+const REQUEST_CATEGORY_LABELS = {
+  movie: 'Movie Premium',
+  desi: 'Desi Premium',
+  non_desi: 'Non Desi Premium',
+  movie_desi: 'Movie + Desi Combo',
+  movie_non_desi: 'Movie + Non Desi Combo',
+  general: 'General Premium',
+};
+
+const getRequestCategoryLabel = (category) => {
+  return REQUEST_CATEGORY_LABELS[String(category || 'general').toLowerCase()] || REQUEST_CATEGORY_LABELS.general;
+};
 
 const logCronTimeSnapshot = () => {
   const now = new Date();
@@ -417,6 +433,52 @@ const offerExpiryChecker = async () => {
   }
 };
 
+// ── 8. PENDING REQUEST REMINDER ────────────────────────────────────────────
+// Runs every 2 hours
+// Reminds users that their premium request is still pending review
+const pendingRequestReminderJob = async (bot) => {
+  logger.info('[CRON] Running pendingRequestReminderJob...');
+
+  const now = new Date();
+  const minAgeCutoff = new Date(now.getTime() - PENDING_REQUEST_REMINDER_AFTER_HOURS * 60 * 60 * 1000);
+  const repeatCutoff = new Date(now.getTime() - PENDING_REQUEST_REMINDER_REPEAT_HOURS * 60 * 60 * 1000);
+
+  const pendingRequests = await Request.find({
+    status: 'pending',
+    requestDate: { $lte: minAgeCutoff },
+    $or: [
+      { pendingReminderAt: null },
+      { pendingReminderAt: { $lte: repeatCutoff } },
+    ],
+  })
+    .select('_id telegramId requestCategory requestDate pendingReminderAt')
+    .sort({ requestDate: 1 })
+    .lean();
+
+  let remindersSent = 0;
+
+  for (const request of pendingRequests) {
+    const sent = await safeSend(
+      bot,
+      request.telegramId,
+      `⏳ *Request Update*\n\n` +
+      `Aapka *${getRequestCategoryLabel(request.requestCategory)}* request abhi review me hai.\n` +
+      `Admin team jaldi verify karegi.\n\n` +
+      `Agar urgent ho to /support use karein.`,
+      { parse_mode: 'Markdown' }
+    );
+
+    if (!sent) continue;
+
+    remindersSent += 1;
+    await Request.findByIdAndUpdate(request._id, { pendingReminderAt: new Date() });
+  }
+
+  if (remindersSent > 0) {
+    logger.info(`pendingRequestReminderJob: ${remindersSent} reminders sent`);
+  }
+};
+
 // ── 7. INVITE LINK EXPIRY NOTIFIER ───────────────────────────────────────────
 // Runs every 15 minutes
 // If invite link expired and user still not in group, notify user once and guide next step.
@@ -491,6 +553,7 @@ const initCronJobs = (bot) => {
   cron.schedule('59 23 * * *', () => dailySummaryJob(bot), cronOptions);     // 23:59
   cron.schedule('5 0 * * *', () => offerExpiryChecker(), cronOptions);       // 00:05
   cron.schedule('*/15 * * * *', () => inviteLinkExpiryNotifier(bot), cronOptions); // every 15 min
+  cron.schedule('0 */2 * * *', () => pendingRequestReminderJob(bot), cronOptions); // every 2 hours
 
   logger.info(`Reminder schedules initialized: ${REMINDER_CRON_SCHEDULES.join(' | ')}`);
   logger.info(`All cron jobs initialized. Timezone: ${CRON_TIMEZONE}`);
@@ -506,4 +569,5 @@ module.exports = {
   dailySummaryJob,
   offerExpiryChecker,
   inviteLinkExpiryNotifier,
+  pendingRequestReminderJob,
 };

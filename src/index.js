@@ -157,18 +157,23 @@ bot.command('help', async (ctx) => {
   const role = user?.role || 'user';
 
   let msg = `🤖 *Bot Commands*\n\n`;
-  msg += `*User:*\n/start — Main menu\n/status — Subscription status\n/referral — Your referral link\n/seller — Seller program dashboard\n/sellerwithdraw — Request seller withdrawal\n/support — Open a support ticket\n/help — This message\n`;
+  msg += `*User:*\n/start — Main menu\n/menu — Quick main menu\n/status — Subscription status\n/offers — View current offers\n/referral — Your referral link\n/seller — Seller program dashboard\n/sellerwithdraw — Request seller withdrawal\n/sellerpayouts — Seller payout status\n/support — Open a support ticket\n/cancel — Close active support chat\n/help — This message\n`;
 
   if (['admin', 'superadmin'].includes(role)) {
-    msg += `\n*Admin:*\n/user <id> — User search panel\n/ban <id> — Ban user from bot\n/unban <id> — Restore bot access\n/invite <id> — Send fresh join link / reset pending request\n/offeruser <id>|<discount> — One-time private offer (today only)\n/revokeplan <id> — Terminate subscription + remove from group\n/modifyplan <id>|<planIdOrDays> — Correct user plan\n/expiries [today|0|1|3|7] — Check upcoming expiry users\n/plans — Active plans\n/tickets — Open support tickets\n/filter "Any Word" — Reply to text/photo/sticker to set DM auto-response\n/unfilter "Any Word" — Remove DM trigger filter\n/filters — List all DM trigger filters\n`;
+    msg += `\n*Admin:*\n/user <id> — User search panel\n/ban <id> — Ban user from bot\n/unban <id> — Restore bot access\n/invite <id> — Send fresh join link / reset pending request\n/offeruser <id>|<discount> — One-time private offer (today only)\n/revokeplan <id> — Terminate subscription + remove from group\n/modifyplan <id>|<planIdOrDays> — Correct user plan\n/legacyadd <planIdOrDays>|<DD/MM/YYYY>|<id1,id2,...> — Import old active members\n/expiries [today|0|1|3|7] — Check upcoming expiry users\n/plans — Active plans\n/tickets — Open support tickets\n/filter "Any Word" — Reply to text/photo/sticker to set DM auto-response\n/unfilter "Any Word" — Remove DM trigger filter\n/filters — List all DM trigger filters\n`;
   }
   if (role === 'superadmin') {
     msg += `\n*Super Admin:*\n/addadmin <id> /removeadmin <id> /admins\n` +
       `/createplan /editplan /deleteplan /pauseplan /listplans\n` +
-      `/legacyadd <planIdOrDays>|<DD/MM/YYYY>|<id1,id2,...> — Import old active members\n` +
       `/addoffer /deleteoffer /listoffers\n` +
       `/broadcast — Broadcast to users\n` +
+      `/bcancel — Cancel active broadcast compose session\n` +
       `/report <Nd|Nm> — Custom CSV report (e.g. 7d, 28d, 1m)\n` +
+      `/sellerpayoutscsv [Nd|Nm|all] — Seller payout CSV export\n` +
+      `/sellerwithdrawalscsv [Nd|Nm|all] [status] — Withdrawals-only CSV export\n` +
+      `/sellerstats [limit] — Seller list (ID, referrals, balance)\n` +
+      `/referralstats [limit] — User referral leaderboard\n` +
+      `/health — Runtime snapshot (DB/bot/cron)\n` +
       `/reports — Sales reports\n` +
       `/stats — Growth dashboard\n` +
       `/planstats — Plan performance\n` +

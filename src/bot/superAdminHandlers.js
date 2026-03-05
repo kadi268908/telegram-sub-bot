@@ -6,7 +6,9 @@ const Plan = require('../models/Plan');
 const Subscription = require('../models/Subscription');
 const Request = require('../models/Request');
 const AdminLog = require('../models/AdminLog');
+const mongoose = require('mongoose');
 const SellerWithdrawalRequest = require('../models/SellerWithdrawalRequest');
+const SellerPayoutLedger = require('../models/SellerPayoutLedger');
 const {
   addAdmin, removeAdmin, createPlan, updatePlan, deletePlan,
   getAllPlans, getActivePlans, createOffer, deleteOffer, getActiveOffers
@@ -14,6 +16,7 @@ const {
 const { getSalesReport, getTodayExpiryList } = require('../services/subscriptionService');
 const { getGrowthStats, getPlanPerformance } = require('../services/analyticsService');
 const {
+  getSellerWithdrawalRequests,
   getPendingSellerWithdrawalRequests,
   approveSellerWithdrawal,
   rejectSellerWithdrawal,
@@ -42,6 +45,17 @@ const requireSuperAdmin = async (ctx, next) => {
 };
 
 const registerSuperAdminHandlers = (bot) => {
+
+  const formatUptime = (secondsRaw) => {
+    const totalSeconds = Math.max(0, Math.floor(Number(secondsRaw) || 0));
+    const days = Math.floor(totalSeconds / 86400);
+    const hours = Math.floor((totalSeconds % 86400) / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    if (days > 0) return `${days}d ${hours}h ${minutes}m ${seconds}s`;
+    if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+    return `${minutes}m ${seconds}s`;
+  };
 
   const isSuperAdminUser = (telegramId) => {
     const superAdminIds = getSuperAdminIds();
@@ -88,9 +102,9 @@ const registerSuperAdminHandlers = (bot) => {
     if (!name || !days || !rawCategory) return ctx.reply('Usage: `/createplan Name|days|price|category`', { parse_mode: 'Markdown' });
     try {
       const normalizedCategory = String(rawCategory).toLowerCase().replace(/[-\s]/g, '_');
-      const allowedCategories = new Set(['movie', 'desi', 'non_desi', 'general']);
+      const allowedCategories = new Set(['movie', 'desi', 'non_desi', 'movie_desi', 'movie_non_desi', 'general']);
       if (!allowedCategories.has(normalizedCategory)) {
-        return ctx.reply('❌ Invalid category. Use: movie, desi, non_desi, general');
+        return ctx.reply('❌ Invalid category. Use: movie, desi, non_desi, movie_desi, movie_non_desi');
       }
 
       const plan = await createPlan({
@@ -389,6 +403,207 @@ const registerSuperAdminHandlers = (bot) => {
     }
   });
 
+  // ── /sellerpayoutscsv [Nd|Nm|all] — seller payouts CSV export ───────────
+  bot.command('sellerpayoutscsv', requireSuperAdmin, async (ctx) => {
+    try {
+      const token = (ctx.message.text.split(' ')[1] || '').trim().toLowerCase();
+
+      let startDate = null;
+      let label = 'all';
+
+      if (token && token !== 'all') {
+        const parsed = parseReportDuration(token);
+        if (!parsed) {
+          return ctx.reply('Usage: `/sellerpayoutscsv [Nd|Nm|all]`\nExamples: `/sellerpayoutscsv 7d`, `/sellerpayoutscsv 1m`, `/sellerpayoutscsv all`', { parse_mode: 'Markdown' });
+        }
+
+        const { value, unit } = parsed;
+        label = `${value}${unit}`;
+        startDate = new Date();
+        if (unit === 'd') startDate.setDate(startDate.getDate() - value);
+        else startDate.setMonth(startDate.getMonth() - value);
+      }
+
+      const withdrawalQuery = startDate
+        ? { requestedAt: { $gte: startDate } }
+        : {};
+      const ledgerQuery = startDate
+        ? { createdAt: { $gte: startDate } }
+        : {};
+
+      const [withdrawals, ledgerRows] = await Promise.all([
+        SellerWithdrawalRequest.find(withdrawalQuery)
+          .sort({ requestedAt: -1 })
+          .lean(),
+        SellerPayoutLedger.find(ledgerQuery)
+          .sort({ createdAt: -1 })
+          .lean(),
+      ]);
+
+      const generatedAt = new Date();
+      const rows = [
+        ['Section', 'Metric', 'Value'],
+        ['Meta', 'Range', label],
+        ['Meta', 'GeneratedAt', generatedAt.toISOString()],
+        ['Summary', 'WithdrawalRows', withdrawals.length],
+        ['Summary', 'LedgerRows', ledgerRows.length],
+      ];
+
+      rows.push([]);
+      rows.push(['Withdrawals', 'RequestId', 'SellerId', 'Status', 'Amount', 'UPI', 'RequestedAt', 'ReviewedAt', 'ReviewedBy', 'Note']);
+      if (withdrawals.length) {
+        withdrawals.forEach((item) => {
+          rows.push([
+            'Withdrawals',
+            String(item._id),
+            item.sellerTelegramId,
+            item.status,
+            Number(item.amount || 0).toFixed(2),
+            item.upiId || '',
+            item.requestedAt ? new Date(item.requestedAt).toISOString() : '',
+            item.reviewedAt ? new Date(item.reviewedAt).toISOString() : '',
+            item.reviewedBy ?? '',
+            item.note || '',
+          ]);
+        });
+      } else {
+        rows.push(['Withdrawals', 'NoData', '', '', '', '', '', '', '', '']);
+      }
+
+      rows.push([]);
+      rows.push(['Ledger', 'EntryId', 'SellerId', 'EntryType', 'Source', 'Amount', 'BalanceAfter', 'RelatedUserId', 'RelatedRequestId', 'CreatedAt', 'CreatedBy', 'Note']);
+      if (ledgerRows.length) {
+        ledgerRows.forEach((entry) => {
+          rows.push([
+            'Ledger',
+            String(entry._id),
+            entry.sellerTelegramId,
+            entry.entryType,
+            entry.source,
+            Number(entry.amount || 0).toFixed(2),
+            Number(entry.balanceAfter || 0).toFixed(2),
+            entry.relatedUserTelegramId ?? '',
+            entry.relatedWithdrawalRequestId ? String(entry.relatedWithdrawalRequestId) : '',
+            entry.createdAt ? new Date(entry.createdAt).toISOString() : '',
+            entry.createdBy ?? '',
+            entry.note || '',
+          ]);
+        });
+      } else {
+        rows.push(['Ledger', 'NoData', '', '', '', '', '', '', '', '', '', '']);
+      }
+
+      const csv = rows.map(toCsvRow).join('\n');
+      const fileName = `seller_payouts_${label}_${generatedAt.toISOString().slice(0, 10)}.csv`;
+
+      await ctx.replyWithDocument(
+        {
+          source: Buffer.from(csv, 'utf8'),
+          filename: fileName,
+        },
+        {
+          caption: `📄 Seller payouts CSV generated for ${label}`,
+        }
+      );
+    } catch (err) {
+      logger.error(`sellerpayoutscsv error: ${err.message}`);
+      await ctx.reply('❌ Failed to generate seller payouts CSV report.');
+    }
+  });
+
+  // ── /sellerwithdrawalscsv [Nd|Nm|all] [status] — withdrawals-only CSV ──
+  bot.command('sellerwithdrawalscsv', requireSuperAdmin, async (ctx) => {
+    try {
+      const parts = String(ctx.message?.text || '').trim().split(/\s+/);
+      const arg1 = String(parts[1] || '').trim().toLowerCase();
+      const arg2 = String(parts[2] || '').trim().toLowerCase();
+
+      const allowedStatuses = new Set(['pending', 'approved', 'rejected', 'all']);
+      let status = 'all';
+      let startDate = null;
+      let label = 'all';
+
+      if (arg1) {
+        if (allowedStatuses.has(arg1)) {
+          status = arg1;
+        } else if (arg1 !== 'all') {
+          const parsed = parseReportDuration(arg1);
+          if (!parsed) {
+            return ctx.reply('Usage: `/sellerwithdrawalscsv [Nd|Nm|all] [pending|approved|rejected|all]`\nExamples: `/sellerwithdrawalscsv 7d`, `/sellerwithdrawalscsv 1m pending`, `/sellerwithdrawalscsv all approved`', { parse_mode: 'Markdown' });
+          }
+
+          const { value, unit } = parsed;
+          label = `${value}${unit}`;
+          startDate = new Date();
+          if (unit === 'd') startDate.setDate(startDate.getDate() - value);
+          else startDate.setMonth(startDate.getMonth() - value);
+        }
+      }
+
+      if (arg2) {
+        if (!allowedStatuses.has(arg2)) {
+          return ctx.reply('Usage: `/sellerwithdrawalscsv [Nd|Nm|all] [pending|approved|rejected|all]`\nExamples: `/sellerwithdrawalscsv 7d`, `/sellerwithdrawalscsv 1m pending`, `/sellerwithdrawalscsv all approved`', { parse_mode: 'Markdown' });
+        }
+        status = arg2;
+      }
+
+      const query = {
+        ...(startDate ? { requestedAt: { $gte: startDate } } : {}),
+        ...(status !== 'all' ? { status } : {}),
+      };
+
+      const withdrawals = await SellerWithdrawalRequest.find(query)
+        .sort({ requestedAt: -1 })
+        .lean();
+
+      const generatedAt = new Date();
+      const rows = [
+        ['Section', 'Metric', 'Value'],
+        ['Meta', 'Range', label],
+        ['Meta', 'StatusFilter', status],
+        ['Meta', 'GeneratedAt', generatedAt.toISOString()],
+        ['Summary', 'WithdrawalRows', withdrawals.length],
+      ];
+
+      rows.push([]);
+      rows.push(['Withdrawals', 'RequestId', 'SellerId', 'Status', 'Amount', 'UPI', 'RequestedAt', 'ReviewedAt', 'ReviewedBy', 'Note']);
+      if (withdrawals.length) {
+        withdrawals.forEach((item) => {
+          rows.push([
+            'Withdrawals',
+            String(item._id),
+            item.sellerTelegramId,
+            item.status,
+            Number(item.amount || 0).toFixed(2),
+            item.upiId || '',
+            item.requestedAt ? new Date(item.requestedAt).toISOString() : '',
+            item.reviewedAt ? new Date(item.reviewedAt).toISOString() : '',
+            item.reviewedBy ?? '',
+            item.note || '',
+          ]);
+        });
+      } else {
+        rows.push(['Withdrawals', 'NoData', '', '', '', '', '', '', '', '']);
+      }
+
+      const csv = rows.map(toCsvRow).join('\n');
+      const fileName = `seller_withdrawals_${label}_${status}_${generatedAt.toISOString().slice(0, 10)}.csv`;
+
+      await ctx.replyWithDocument(
+        {
+          source: Buffer.from(csv, 'utf8'),
+          filename: fileName,
+        },
+        {
+          caption: `📄 Seller withdrawals CSV generated for ${label} (${status})`,
+        }
+      );
+    } catch (err) {
+      logger.error(`sellerwithdrawalscsv error: ${err.message}`);
+      await ctx.reply('❌ Failed to generate seller withdrawals CSV report.');
+    }
+  });
+
   // ── /stats — growth dashboard ──────────────────────────────────────────────
   bot.command('stats', requireSuperAdmin, async (ctx) => {
     try {
@@ -424,22 +639,197 @@ const registerSuperAdminHandlers = (bot) => {
     }
   });
 
+  // ── /health — runtime snapshot ────────────────────────────────────────────
+  bot.command('health', requireSuperAdmin, async (ctx) => {
+    try {
+      const dbStateMap = {
+        0: 'disconnected',
+        1: 'connected',
+        2: 'connecting',
+        3: 'disconnecting',
+      };
+      const readyState = mongoose?.connection?.readyState ?? 0;
+      const dbState = dbStateMap[readyState] || 'unknown';
+      const dbHost = mongoose?.connection?.host || 'N/A';
+      const dbName = mongoose?.connection?.name || 'N/A';
+
+      let botUsername = 'N/A';
+      let botId = 'N/A';
+      try {
+        const me = await bot.telegram.getMe();
+        botUsername = me?.username ? `@${me.username}` : 'N/A';
+        botId = me?.id || 'N/A';
+      } catch (_) { }
+
+      const memory = process.memoryUsage();
+      const rssBytes = Number(memory.rss || 0);
+      const heapUsedBytes = Number(memory.heapUsed || 0);
+      const heapTotalBytes = Number(memory.heapTotal || 0);
+
+      const rssMb = (rssBytes / (1024 * 1024)).toFixed(1);
+      const heapUsedMb = (heapUsedBytes / (1024 * 1024)).toFixed(1);
+      const heapTotalMb = (heapTotalBytes / (1024 * 1024)).toFixed(1);
+      const heapUtilization = heapTotalBytes > 0
+        ? heapUsedBytes / heapTotalBytes
+        : 0;
+      const uptimeSeconds = Math.floor(process.uptime());
+
+      const highHeapUtil = heapUtilization >= 0.92;
+      const highHeapAbs = heapUsedBytes >= 150 * 1024 * 1024;
+      const highRssAbs = rssBytes >= 500 * 1024 * 1024;
+      const warmupWindow = uptimeSeconds < 120;
+      const memoryPressure = highRssAbs || (highHeapUtil && highHeapAbs);
+
+      const cronTimezone = process.env.CRON_TIMEZONE || 'Asia/Kolkata';
+      const reminderSchedules = process.env.REMINDER_CRON_SCHEDULES || '15 9 * * *,0 20 * * *';
+
+      let healthIcon = '🟢';
+      let healthLabel = 'HEALTHY';
+      let healthReason = 'All core systems operational';
+
+      if (![1, 2, 3].includes(readyState)) {
+        healthIcon = '🔴';
+        healthLabel = 'CRITICAL';
+        healthReason = 'Database disconnected';
+      } else if (readyState !== 1 || memoryPressure || botUsername === 'N/A') {
+        healthIcon = '🟡';
+        healthLabel = 'DEGRADED';
+        if (readyState !== 1) healthReason = `Database ${dbState}`;
+        else if (memoryPressure) healthReason = highRssAbs ? 'High RSS memory usage' : 'High heap memory pressure';
+        else healthReason = 'Bot identity check failed';
+      } else if (warmupWindow && highHeapUtil) {
+        healthIcon = '🟡';
+        healthLabel = 'DEGRADED';
+        healthReason = 'Startup warm-up (heap filling; monitor for 2 mins)';
+      }
+
+      const msg =
+        `🩺 *System Health Snapshot*\n\n` +
+        `${healthIcon} *${healthLabel}* — ${healthReason}\n\n` +
+        `🤖 Bot: *${botUsername}* (ID: \`${botId}\`)\n` +
+        `🟢 Process: PID \`${process.pid}\`\n` +
+        `⏱ Uptime: *${formatUptime(process.uptime())}*\n` +
+        `🧠 Memory: RSS *${rssMb} MB* | Heap *${heapUsedMb}/${heapTotalMb} MB*\n\n` +
+        `🗄 DB State: *${dbState.toUpperCase()}* (code: \`${readyState}\`)\n` +
+        `🧭 DB Host: \`${dbHost}\`\n` +
+        `📚 DB Name: \`${dbName}\`\n\n` +
+        `🕒 Cron TZ: *${cronTimezone}*\n` +
+        `⏰ Reminder Schedules: \`${reminderSchedules}\`\n` +
+        `🌐 Server Time: ${new Date().toLocaleString('en-IN')}`;
+
+      await ctx.reply(msg, { parse_mode: 'Markdown' });
+    } catch (err) {
+      logger.error(`health command error: ${err.message}`);
+      await ctx.reply('❌ Unable to fetch health snapshot right now.');
+    }
+  });
+
+  // ── /sellerstats [limit] — seller summary list ───────────────────────────
+  bot.command('sellerstats', requireSuperAdmin, async (ctx) => {
+    try {
+      const limitArg = parseInt((ctx.message.text.split(' ')[1] || '20').trim(), 10);
+      const limit = Number.isFinite(limitArg) ? Math.min(Math.max(limitArg, 1), 100) : 20;
+
+      const sellers = await User.find({ isSeller: true })
+        .select('telegramId name username sellerCode sellerStats')
+        .sort({ 'sellerStats.availableBalance': -1, 'sellerStats.qualifiedReferrals': -1, createdAt: -1 })
+        .limit(limit)
+        .lean();
+
+      if (!sellers.length) return ctx.reply('ℹ️ No registered sellers found.');
+
+      let msg = `🛍 *Seller Status List* (Top ${sellers.length})\n\n`;
+      sellers.forEach((seller, index) => {
+        const stats = seller.sellerStats || {};
+        msg += `${index + 1}. Seller ID: \`${seller.telegramId}\`\n`;
+        msg += `   Name: ${seller.name || 'N/A'}${seller.username ? ` (@${seller.username})` : ''}\n`;
+        msg += `   Seller Code: \`${seller.sellerCode || 'N/A'}\`\n`;
+        msg += `   Referrals: *${Number(stats.totalReferrals || 0)}*\n`;
+        msg += `   Qualified: *${Number(stats.qualifiedReferrals || 0)}*\n`;
+        msg += `   Available Amount: *₹${Number(stats.availableBalance || 0).toFixed(2)}*\n`;
+        msg += `   Lifetime Earned: *₹${Number(stats.lifetimeEarnings || 0).toFixed(2)}*\n\n`;
+      });
+
+      msg += 'Usage: `/sellerstats` or `/sellerstats 50`';
+      await ctx.reply(msg, { parse_mode: 'Markdown' });
+    } catch (err) {
+      logger.error(`sellerstats error: ${err.message}`);
+      await ctx.reply('❌ Unable to fetch seller stats right now.');
+    }
+  });
+
+  // ── /referralstats [limit] — user referral leaderboard ───────────────────
+  bot.command('referralstats', requireSuperAdmin, async (ctx) => {
+    try {
+      const limitArg = parseInt((ctx.message.text.split(' ')[1] || '20').trim(), 10);
+      const limit = Number.isFinite(limitArg) ? Math.min(Math.max(limitArg, 1), 100) : 20;
+
+      const referralCounts = await User.aggregate([
+        { $match: { referredBy: { $ne: null } } },
+        { $group: { _id: '$referredBy', referralCount: { $sum: 1 } } },
+        { $sort: { referralCount: -1, _id: 1 } },
+        { $limit: limit },
+      ]);
+
+      if (!referralCounts.length) return ctx.reply('ℹ️ No referral data found yet.');
+
+      const referrerIds = referralCounts.map((item) => Number(item._id)).filter(Boolean);
+      const referrerUsers = await User.find({ telegramId: { $in: referrerIds } })
+        .select('telegramId name username')
+        .lean();
+      const referrerMap = new Map(referrerUsers.map((item) => [Number(item.telegramId), item]));
+
+      let msg = `🤝 *Referral Leaderboard* (Top ${referralCounts.length})\n\n`;
+      referralCounts.forEach((item, index) => {
+        const userId = Number(item._id);
+        const user = referrerMap.get(userId);
+        msg += `${index + 1}. User ID: \`${userId}\`\n`;
+        msg += `   Name: ${user?.name || 'N/A'}${user?.username ? ` (@${user.username})` : ''}\n`;
+        msg += `   Referrals: *${Number(item.referralCount || 0)}*\n\n`;
+      });
+
+      msg += 'Usage: `/referralstats` or `/referralstats 50`';
+      await ctx.reply(msg, { parse_mode: 'Markdown' });
+    } catch (err) {
+      logger.error(`referralstats error: ${err.message}`);
+      await ctx.reply('❌ Unable to fetch referral stats right now.');
+    }
+  });
+
   // ── Seller withdrawal management ──────────────────────────────────────────
   bot.command('sellerwithdrawals', requireSuperAdmin, async (ctx) => {
-    const items = await getPendingSellerWithdrawalRequests(20);
-    if (!items.length) return ctx.reply('✅ No pending seller withdrawals.');
+    const parts = String(ctx.message?.text || '').trim().split(/\s+/);
+    const statusArgRaw = String(parts[1] || 'pending').toLowerCase();
+    const allowedStatuses = new Set(['pending', 'approved', 'rejected', 'all']);
+    const status = allowedStatuses.has(statusArgRaw) ? statusArgRaw : 'pending';
+    const sellerId = parts[2] ? parseInt(parts[2], 10) : null;
 
-    let msg = '💸 *Pending Seller Withdrawals*\n\n';
+    if (parts[2] && !sellerId) {
+      return ctx.reply('Usage: /sellerwithdrawals [pending|approved|rejected|all] [sellerTelegramId]');
+    }
+
+    const items = status === 'pending' && !sellerId
+      ? await getPendingSellerWithdrawalRequests(20)
+      : await getSellerWithdrawalRequests({ status, limit: 20, sellerTelegramId: sellerId });
+
+    if (!items.length) return ctx.reply(`✅ No ${status} seller withdrawals found.`);
+
+    let msg = `💸 *Seller Withdrawals — ${status.toUpperCase()}*\n`;
+    if (sellerId) msg += `Seller Filter: \`${sellerId}\`\n`;
+    msg += '\n';
+
     items.forEach((item, i) => {
       msg += `${i + 1}. ID: \`${item._id}\`\n`;
       msg += `   Seller: \`${item.sellerTelegramId}\`\n`;
+      msg += `   Status: *${String(item.status || '').toUpperCase()}*\n`;
       msg += `   UPI: \`${item.upiId || 'N/A'}\`\n`;
       msg += `   Amount: *₹${Number(item.amount).toFixed(2)}*\n`;
       msg += `   Requested: ${new Date(item.requestedAt).toLocaleString('en-IN')}\n\n`;
     });
 
     msg += 'Approve: `/approvesellerwd <requestId>`\n';
-    msg += 'Reject: `/rejectsellerwd <requestId> | reason`';
+    msg += 'Reject: `/rejectsellerwd <requestId> | reason`\n\n';
+    msg += 'Filter usage: `/sellerwithdrawals pending` or `/sellerwithdrawals approved 123456789`';
     await ctx.reply(msg, { parse_mode: 'Markdown' });
   });
 
@@ -640,8 +1030,8 @@ const registerSuperAdminHandlers = (bot) => {
     await ctx.reply(msg, { parse_mode: 'Markdown' });
   });
 
-  // ── /cancel ────────────────────────────────────────────────────────────────
-  bot.command('cancel', requireSuperAdmin, async (ctx) => {
+  // ── /bcancel ───────────────────────────────────────────────────────────────
+  bot.command('bcancel', requireSuperAdmin, async (ctx) => {
     if (sessions[ctx.from.id]) {
       delete sessions[ctx.from.id];
       await ctx.reply('✅ Cancelled.');

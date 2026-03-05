@@ -30,6 +30,25 @@ const { generateInviteLink, isGroupMember, safeSend, banFromGroup, unbanFromGrou
 const { PLAN_CATEGORY, normalizePlanCategory, getGroupIdForCategory, getAllPremiumGroupIds } = require('../utils/premiumGroups');
 const logger = require('../utils/logger');
 
+const expandComboCategories = (category) => {
+  const normalized = normalizePlanCategory(category);
+  if (normalized === PLAN_CATEGORY.MOVIE_DESI) {
+    return [PLAN_CATEGORY.MOVIE, PLAN_CATEGORY.DESI];
+  }
+  if (normalized === PLAN_CATEGORY.MOVIE_NON_DESI) {
+    return [PLAN_CATEGORY.MOVIE, PLAN_CATEGORY.NON_DESI];
+  }
+  return [normalized];
+};
+
+const getCategoryShortLabel = (category) => {
+  const normalized = normalizePlanCategory(category);
+  if (normalized === PLAN_CATEGORY.MOVIE) return 'Movie';
+  if (normalized === PLAN_CATEGORY.DESI) return 'Desi';
+  if (normalized === PLAN_CATEGORY.NON_DESI) return 'Non Desi';
+  return normalized;
+};
+
 const getSuperAdminIds = () => {
   return String(process.env.SUPER_ADMIN_IDS || process.env.SUPER_ADMIN_ID || '')
     .split(',')
@@ -396,62 +415,84 @@ const registerAdminHandlers = (bot) => {
         return ctx.answerCbQuery('❌ Plan category mismatch for this request', { show_alert: true });
       }
 
-      const premiumGroupId = getGroupIdForCategory(resolvedPlanCategory);
-      if (!premiumGroupId) {
-        return ctx.answerCbQuery('❌ Premium group not configured for this category', { show_alert: true });
+      const targetCategories = [...new Set(expandComboCategories(resolvedPlanCategory))];
+      const categoryGroupPairs = targetCategories.map((category) => ({
+        category,
+        groupId: getGroupIdForCategory(category),
+      }));
+
+      if (categoryGroupPairs.some((item) => !item.groupId)) {
+        return ctx.answerCbQuery('❌ Premium group not configured for one or more categories', { show_alert: true });
       }
 
-      const subscription = await createSubscription(request.telegramId, plan, ctx.from.id, {
-        planCategory: resolvedPlanCategory,
-        premiumGroupId,
-      });
+      const subscriptions = [];
+      for (const item of categoryGroupPairs) {
+        const sub = await createSubscription(request.telegramId, plan, ctx.from.id, {
+          planCategory: item.category,
+          premiumGroupId: item.groupId,
+        });
+        subscriptions.push({ ...item, subscription: sub });
+      }
+
       await approveRequest(requestId, ctx.from.id, plan._id);
 
-      // Check if user is already in the premium group (renewal case)
-      const alreadyInGroup = await isGroupMember(bot, premiumGroupId, request.telegramId);
+      const allRenewal = subscriptions.every((item) => item.subscription?.isRenewal);
+      const maxExpiry = subscriptions
+        .map((item) => item.subscription?.expiryDate)
+        .filter(Boolean)
+        .sort((left, right) => new Date(right).getTime() - new Date(left).getTime())[0];
 
       let userMessage;
       const extra = { parse_mode: 'Markdown' };
-      if (subscription.isRenewal && alreadyInGroup) {
-        // Renewal — user stays in group, no invite needed
-        userMessage =
-          `🎉 *Subscription Renewed!*\n\n` +
-          `📋 Plan: *${plan.name}*\n` +
-          `➕ Extended by: *${plan.durationDays} days*\n` +
-          `📅 New Expiry: *${formatDate(subscription.expiryDate)}*\n\n` +
-          `Apka premium renew ho gaya hai. \n\n` +
-          `Thank you! 🙏`;
-      } else {
-        // New subscription or user left group — generate invite link
-        await unbanFromGroup(bot, premiumGroupId, request.telegramId);
+      const inviteButtons = [];
+
+      for (const item of subscriptions) {
+        const alreadyInGroup = await isGroupMember(bot, item.groupId, request.telegramId);
+        if (item.subscription?.isRenewal && alreadyInGroup) continue;
+
+        await unbanFromGroup(bot, item.groupId, request.telegramId);
         const inviteLink = await generateInviteLink(
-          bot, premiumGroupId, request.telegramId, subscription.expiryDate
+          bot, item.groupId, request.telegramId, item.subscription.expiryDate
         );
 
         if (inviteLink) {
-          await Subscription.findByIdAndUpdate(subscription._id, {
+          await Subscription.findByIdAndUpdate(item.subscription._id, {
             inviteLink,
             inviteLinkIssuedAt: new Date(),
             inviteLinkTtlMinutes: Math.max(1, parseInt(process.env.INVITE_LINK_TTL_MINUTES || '10', 10)),
           });
+          inviteButtons.push({
+            text: `🔗 Join ${getCategoryShortLabel(item.category)} Group`,
+            url: inviteLink,
+            style: 'success',
+          });
         }
+      }
 
+      if (allRenewal && inviteButtons.length === 0) {
+        userMessage =
+          `🎉 *Subscription Renewed!*\n\n` +
+          `📋 Plan: *${plan.name}*\n` +
+          `➕ Extended by: *${plan.durationDays} days*\n` +
+          `📅 New Expiry: *${formatDate(maxExpiry)}*\n\n` +
+          `Apka premium renew ho gaya hai. \n\n` +
+          `Thank you! 🙏`;
+      } else {
         userMessage =
           `🎉 *Access Approved!*\n\n` +
           `📋 Plan: *${plan.name}*\n` +
           `📅 Valid for: *${plan.durationDays} days*\n` +
-          `⏰ Expires on: *${formatDate(subscription.expiryDate)}*\n\n` +
-          (inviteLink
+          `⏰ Expires on: *${formatDate(maxExpiry)}*\n\n` +
+          (inviteButtons.length
             ? `🔗 *Premium Group join kijiye niche diye gai button pe click karke*\n\n` +
             `⚠️ Yeh single-use link hai. Kripya iss link ko share na kare nahi to aap ban ho shakte hain.\n\n`
             : '') +
           `Thank you for joining! 🙏\n\n` +
           `📌 Iss bot ko block nahi kijiyega nahi to aage aane waale offers miss ho jayenge.`;
 
-        // Send invite as a button instead of plain text URL
-        if (inviteLink) {
+        if (inviteButtons.length) {
           extra.reply_markup = {
-            inline_keyboard: [[{ text: '🔗 Join Premium Group', url: inviteLink, style: 'success' }]],
+            inline_keyboard: inviteButtons.map((button) => ([button])),
           };
         }
       }
@@ -466,18 +507,18 @@ const registerAdminHandlers = (bot) => {
           ctx.callbackQuery.message.text +
           `\n\n✅ *APPROVED* by ${ctx.from.username ? '@' + ctx.from.username : ctx.from.id}` +
           ` — ${plan.name}` +
-          (subscription.isRenewal ? ' [RENEWAL]' : ''),
+          (allRenewal ? ' [RENEWAL]' : ''),
           { parse_mode: 'Markdown' }
         );
       } catch (_) { }
 
       await logToChannel(bot,
-        `✅ *Subscription ${subscription.isRenewal ? 'Renewed' : 'Approved'}*\n` +
+        `✅ *Subscription ${allRenewal ? 'Renewed' : 'Approved'}*\n` +
         `User: \`${request.telegramId}\`\n` +
         `Category: ${resolvedPlanCategory}\n` +
-        `Group: \`${premiumGroupId}\`\n` +
+        `Group(s): ${subscriptions.map((item) => `\`${item.groupId}\``).join(', ')}\n` +
         `Plan: ${plan.name} (${plan.durationDays}d)\n` +
-        `Expires: ${formatDate(subscription.expiryDate)}\n` +
+        `Expires: ${formatDate(maxExpiry)}\n` +
         `By: ${ctx.from.username ? '@' + ctx.from.username : ctx.from.id}`
       );
 
@@ -489,8 +530,9 @@ const registerAdminHandlers = (bot) => {
           plan: plan.name,
           durationDays: plan.durationDays,
           category: resolvedPlanCategory,
-          premiumGroupId,
-          isRenewal: subscription.isRenewal,
+          premiumGroupIds: subscriptions.map((item) => item.groupId),
+          atomicCategories: subscriptions.map((item) => item.category),
+          isRenewal: allRenewal,
         },
       });
 

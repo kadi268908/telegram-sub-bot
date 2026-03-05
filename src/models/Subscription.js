@@ -26,7 +26,7 @@ const subscriptionSchema = new mongoose.Schema({
   },
   planCategory: {
     type: String,
-    enum: ['movie', 'desi', 'non_desi', 'general'],
+    enum: ['movie', 'desi', 'non_desi', 'movie_desi', 'movie_non_desi', 'general'],
     default: 'general',
     index: true,
   },

@@ -31,10 +31,15 @@ const {
   registerSellerProgram,
   getSellerProgramSummary,
   requestSellerWithdrawal,
+  getSellerWithdrawalHistory,
+  getSellerPayoutLedgerHistory,
 } = require('../services/referralService');
 const { safeSend, renewalKeyboard, isGroupMember } = require('../utils/telegramUtils');
 const { formatDate, daysRemaining } = require('../utils/dateUtils');
 const { getGroupIdForCategory } = require('../utils/premiumGroups');
+const { USER_FLOW_STATE, getUserFlowState, buildSetUserFlowUpdate } = require('../utils/userFlowState');
+const { registerPaymentFlow } = require('./paymentFlow');
+const { registerSellerFlow, handleSellerWithdrawalUpiMessage } = require('./sellerFlow');
 const logger = require('../utils/logger');
 
 const REJOINING_PENALTY = process.env.REJOINING_PENALTY || '20';
@@ -44,6 +49,8 @@ const PLAN_CATEGORY = {
   MOVIE: 'movie',
   DESI: 'desi',
   NON_DESI: 'non_desi',
+  MOVIE_DESI: 'movie_desi',
+  MOVIE_NON_DESI: 'movie_non_desi',
   GENERAL: 'general',
 };
 
@@ -51,6 +58,8 @@ const PLAN_CATEGORY_LABELS = {
   [PLAN_CATEGORY.MOVIE]: 'Movie Premium',
   [PLAN_CATEGORY.DESI]: 'Desi Premium',
   [PLAN_CATEGORY.NON_DESI]: 'Non Desi Premium',
+  [PLAN_CATEGORY.MOVIE_DESI]: 'Movie + Desi Combo',
+  [PLAN_CATEGORY.MOVIE_NON_DESI]: 'Movie + Non Desi Combo',
   [PLAN_CATEGORY.GENERAL]: 'General Premium',
 };
 
@@ -58,12 +67,16 @@ const PLAN_CATEGORY_BUTTON_LABELS = {
   [PLAN_CATEGORY.MOVIE]: 'Movie Plan',
   [PLAN_CATEGORY.DESI]: 'Desi Po*n Plan',
   [PLAN_CATEGORY.NON_DESI]: 'Non-Desi Po*n Plan',
+  [PLAN_CATEGORY.MOVIE_DESI]: 'Movie + Desi Combo',
+  [PLAN_CATEGORY.MOVIE_NON_DESI]: 'Movie + Non-Desi Combo',
 };
 
 const QR_ASSET_BY_CATEGORY = {
   [PLAN_CATEGORY.MOVIE]: 'qr-code.jpg',
   [PLAN_CATEGORY.DESI]: 'qr-code.jpg',
   [PLAN_CATEGORY.NON_DESI]: 'qr-code.jpg',
+  [PLAN_CATEGORY.MOVIE_DESI]: 'qr-code.jpg',
+  [PLAN_CATEGORY.MOVIE_NON_DESI]: 'qr-code.jpg',
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -80,7 +93,14 @@ const escapeMarkdown = (value) => {
 
 const normalizePlanCategory = (value) => {
   const normalized = String(value || PLAN_CATEGORY.GENERAL).toLowerCase().replace(/[-\s]/g, '_');
-  if ([PLAN_CATEGORY.MOVIE, PLAN_CATEGORY.DESI, PLAN_CATEGORY.NON_DESI, PLAN_CATEGORY.GENERAL].includes(normalized)) {
+  if ([
+    PLAN_CATEGORY.MOVIE,
+    PLAN_CATEGORY.DESI,
+    PLAN_CATEGORY.NON_DESI,
+    PLAN_CATEGORY.MOVIE_DESI,
+    PLAN_CATEGORY.MOVIE_NON_DESI,
+    PLAN_CATEGORY.GENERAL,
+  ].includes(normalized)) {
     return normalized;
   }
   return PLAN_CATEGORY.GENERAL;
@@ -96,6 +116,8 @@ const formatInr = (value) => {
   const rounded = Math.round(number * 100) / 100;
   return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2);
 };
+
+const REFERRAL_REWARD_DISCOUNT_PERCENT = Math.min(100, Math.max(0, parseFloat(process.env.REFERRAL_REWARD_DISCOUNT_PERCENT || '10')));
 
 const getBestPublicOffer = async () => {
   const offers = await getActiveOffers();
@@ -152,6 +174,7 @@ const sellerProgramKeyboard = (isRegistered, canWithdraw = false) => {
 
   if (isRegistered) {
     rows.push([withStyle(Markup.button.callback('💸 Request Withdrawal', 'seller_withdraw'), canWithdraw ? 'success' : 'primary')]);
+    rows.push([withStyle(Markup.button.callback('🧾 Seller Payout Status', 'seller_payout_status'), 'primary')]);
   }
 
   rows.push([withStyle(Markup.button.callback('⬅️ Back', 'more_menu'), 'success')]);
@@ -394,6 +417,8 @@ const registerUserHandlers = (bot) => {
     [withStyle(Markup.button.callback('🎬 Movie Plan', 'plan_menu_movie'), 'primary')],
     [withStyle(Markup.button.callback('🔥 Desi Po*n Plan', 'plan_menu_desi'), 'primary')],
     [withStyle(Markup.button.callback('🌍 Non-Desi Po*n Plan', 'plan_menu_non_desi'), 'primary')],
+    [withStyle(Markup.button.callback('🎬+🔥 Movie + Desi Combo', 'plan_menu_movie_desi'), 'success')],
+    [withStyle(Markup.button.callback('🎬+🌍 Movie + Non-Desi Combo', 'plan_menu_movie_non_desi'), 'success')],
     [withStyle(Markup.button.callback('⬅️ Back Button', 'back_to_main'), 'success')],
   ]);
 
@@ -410,6 +435,8 @@ const registerUserHandlers = (bot) => {
     [withStyle(Markup.button.callback('🎬 Movie Premium', 'request_premium_movie'), 'success')],
     [withStyle(Markup.button.callback('🔥 Desi Premium', 'request_premium_desi'), 'success')],
     [withStyle(Markup.button.callback('🌍 Non Desi Premium', 'request_premium_non_desi'), 'success')],
+    [withStyle(Markup.button.callback('🎬+🔥 Movie + Desi Combo', 'request_premium_movie_desi'), 'primary')],
+    [withStyle(Markup.button.callback('🎬+🌍 Movie + Non-Desi Combo', 'request_premium_movie_non_desi'), 'primary')],
     [Markup.button.callback('🎫 Support Chat', 'open_support')],
   ]);
 
@@ -423,6 +450,12 @@ const registerUserHandlers = (bot) => {
     }
     if (categories.includes(PLAN_CATEGORY.NON_DESI)) {
       rows.push([withStyle(Markup.button.callback('🔄 Renew Non Desi Premium', 'status_renew_non_desi'), 'success')]);
+    }
+    if (categories.includes(PLAN_CATEGORY.MOVIE_DESI)) {
+      rows.push([withStyle(Markup.button.callback('🔄 Renew Movie + Desi Combo', 'status_renew_movie_desi'), 'success')]);
+    }
+    if (categories.includes(PLAN_CATEGORY.MOVIE_NON_DESI)) {
+      rows.push([withStyle(Markup.button.callback('🔄 Renew Movie + Non-Desi Combo', 'status_renew_movie_non_desi'), 'success')]);
     }
     rows.push([withStyle(Markup.button.callback('🏠 Main Menu', 'back_to_main'), 'primary')]);
     return Markup.inlineKeyboard(rows);
@@ -478,6 +511,17 @@ const registerUserHandlers = (bot) => {
       }
     );
   };
+
+  bot.command('menu', async (ctx) => {
+    try {
+      const user = await findOrCreateUser(ctx.from);
+      await User.findByIdAndUpdate(user._id, { lastInteraction: new Date() });
+      await sendMainMenuMessage(ctx, user.name || ctx.from?.first_name || 'User');
+    } catch (err) {
+      logger.error(`menu command error: ${err.message}`);
+      await ctx.reply('❌ Menu open nahi ho paya. Please try again.');
+    }
+  });
 
   const submitPremiumRequest = async (ctx, category) => {
     const normalizedCategory = normalizePlanCategory(category);
@@ -575,14 +619,17 @@ const registerUserHandlers = (bot) => {
 
     await User.findByIdAndUpdate(user._id, {
       status: 'pending',
-      $set: { 'meta.awaitingPaymentScreenshot': false },
-      $unset: {
-        'meta.latestPaymentProof': '',
-        'meta.paymentProofReadyForCategory': '',
-        'meta.paymentCategory': '',
-        'meta.paymentFlowType': '',
-        'meta.renewalPlanId': '',
-      },
+      ...buildSetUserFlowUpdate(
+        USER_FLOW_STATE.IDLE,
+        {},
+        {
+          'meta.latestPaymentProof': '',
+          'meta.paymentProofReadyForCategory': '',
+          'meta.paymentCategory': '',
+          'meta.paymentFlowType': '',
+          'meta.renewalPlanId': '',
+        }
+      ),
     });
 
     await ctx.reply(
@@ -703,224 +750,48 @@ const registerUserHandlers = (bot) => {
     );
   });
 
-  bot.action(/^plan_menu_(movie|desi|non_desi)$/, async (ctx) => {
-    await ctx.answerCbQuery();
-    try {
-      const category = normalizePlanCategory(ctx.match[1]);
-      const plansText = await buildCategoryPlansText(category);
-      const activeCategorySub = await Subscription.findOne({
-        telegramId: ctx.from.id,
-        status: 'active',
-        expiryDate: { $gt: new Date() },
-        planCategory: category,
-      });
-      const plansMessage = activeCategorySub
-        ? `${plansText}\n\n✅ You already have an active ${getPlanCategoryLabel(category)} subscription.\nIf you want to extend it, click *Renew*.`
-        : plansText;
-      const qrFileName = QR_ASSET_BY_CATEGORY[category];
-      const qrPath = path.join(process.cwd(), 'assets', qrFileName);
-      const paidRows = [];
-      if (activeCategorySub) {
-        paidRows.push([withStyle(Markup.button.callback(`🔄 Renew ${getPlanCategoryLabel(category)}`, `status_renew_${category}`), 'success')]);
-      }
-      paidRows.push([withStyle(Markup.button.callback('✅ Paid', `paid_${category}`), 'success')]);
-      paidRows.push([withStyle(Markup.button.callback('🏠 Main Menu', 'back_to_main'), 'primary')]);
-      const paidKeyboard = Markup.inlineKeyboard(paidRows);
-
-      if (fs.existsSync(qrPath)) {
-        await ctx.replyWithPhoto(
-          { source: qrPath },
-          {
-            caption: plansMessage,
-            ...paidKeyboard,
-          }
-        );
-      } else {
-        await ctx.reply(
-          `${plansMessage}\n\n⚠️ QR image missing: ${qrFileName} (assets folder).`,
-          {
-            ...paidKeyboard,
-          }
-        );
-      }
-    } catch (err) {
-      logger.error(`plan_menu error: ${err.message}`);
-      await ctx.reply('❌ Plan fetch failed. Please try again.');
-    }
+  registerPaymentFlow({
+    bot,
+    fs,
+    path,
+    User,
+    Request,
+    Subscription,
+    Plan,
+    Markup,
+    withStyle,
+    logger,
+    PLAN_CATEGORY,
+    QR_ASSET_BY_CATEGORY,
+    normalizePlanCategory,
+    getPlanCategoryLabel,
+    buildCategoryPlansText,
+    buildSetUserFlowUpdate,
+    USER_FLOW_STATE,
+    escapeMarkdown,
+    findOrCreateUser,
+    getBestPublicOffer,
+    getDiscountedPrice,
+    formatInr,
+    consumeOneTimeUserOffer,
+    submitPremiumRequest,
+    getActiveTicket,
   });
 
-  bot.action(/^paid_(movie|desi|non_desi)$/, async (ctx) => {
-    await ctx.answerCbQuery();
-    try {
-      const callbackMessageId = ctx.callbackQuery?.message?.message_id;
-      const callbackChatId = ctx.callbackQuery?.message?.chat?.id;
-      const category = normalizePlanCategory(ctx.match[1]);
-      await User.findOneAndUpdate(
-        { telegramId: ctx.from.id },
-        {
-          $set: {
-            'meta.awaitingPaymentScreenshot': true,
-            'meta.paymentCategory': category,
-            'meta.paymentFlowType': 'new_request',
-          },
-          $unset: {
-            'meta.paymentProofReadyForCategory': '',
-            'meta.renewalPlanId': '',
-          },
-        },
-        { upsert: false }
-      );
-
-      await ctx.reply(
-        `📸 *Payment screenshot upload karein*\n\n` +
-        `Aapne *${escapeMarkdown(getPlanCategoryLabel(category))}* select kiya hai.\n` +
-        `Ab payment screenshot photo/document bhejiye.` +
-        `🚫 Agar aapne fake screenshot upload kiya to aap hamesha k liye ban ho jaogye.\n\n`,
-        {
-          parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([
-            [withStyle(Markup.button.callback('❌ Cancel Upload', 'cancel_payment_upload'), 'danger')],
-            [withStyle(Markup.button.callback('🏠 Main Menu', 'back_to_main'), 'primary')],
-          ]),
-        }
-      );
-
-      if (callbackChatId && callbackMessageId) {
-        await ctx.telegram.deleteMessage(callbackChatId, callbackMessageId).catch(() => { });
-      }
-    } catch (err) {
-      logger.error(`paid action error: ${err.message}`);
-      await ctx.reply('❌ Unable to process. Please try again.');
-    }
-  });
-
-  bot.action('cancel_payment_upload', async (ctx) => {
-    await ctx.answerCbQuery('Upload cancelled');
-    try {
-      await User.findOneAndUpdate(
-        { telegramId: ctx.from.id },
-        {
-          $set: { 'meta.awaitingPaymentScreenshot': false },
-          $unset: {
-            'meta.paymentCategory': '',
-            'meta.paymentProofReadyForCategory': '',
-            'meta.paymentFlowType': '',
-            'meta.renewalPlanId': '',
-          },
-        }
-      );
-
-      await ctx.reply(
-        `✅ Screenshot upload mode cancelled.\n\n` +
-        `Aap dubara plan choose karke continue kar sakte hain.`,
-        {
-          parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([
-            [withStyle(Markup.button.callback('📋 Check Plans', 'check_plans'), 'success')],
-            [withStyle(Markup.button.callback('🏠 Main Menu', 'back_to_main'), 'primary')],
-          ]),
-        }
-      );
-    } catch (err) {
-      logger.error(`cancel_payment_upload error: ${err.message}`);
-      await ctx.reply('❌ Unable to cancel upload mode right now. Please try again.');
-    }
-  });
-
-  // ── Seller Program ───────────────────────────────────────────────────────
-  const showSellerProgram = async (ctx) => {
-    const summary = await getSellerProgramSummary(ctx.from.id);
-    if (!summary) return ctx.reply('❌ User not found. Please use /start first.');
-
-    const botInfo = await bot.telegram.getMe();
-    await ctx.reply(
-      formatSellerProgramMessage(summary, botInfo.username),
-      {
-        parse_mode: 'Markdown',
-        ...sellerProgramKeyboard(summary.isSeller, summary.canWithdraw),
-      }
-    );
-  };
-
-  bot.action('seller_program', async (ctx) => {
-    await ctx.answerCbQuery();
-    await showSellerProgram(ctx);
-  });
-
-  bot.action('register_seller', async (ctx) => {
-    await ctx.answerCbQuery('Registering...');
-    try {
-      await registerSellerProgram(ctx.from.id);
-      await showSellerProgram(ctx);
-    } catch (err) {
-      logger.error(`register_seller error: ${err.message}`);
-      await ctx.reply('❌ Seller registration failed. Please try again.');
-    }
-  });
-
-  bot.command('seller', showSellerProgram);
-
-  const startSellerWithdrawalUpiFlow = async (ctx) => {
-    await User.findOneAndUpdate(
-      { telegramId: ctx.from.id },
-      {
-        $set: { 'meta.awaitingSellerWithdrawalUpi': true },
-      }
-    );
-
-    await ctx.reply(
-      `💸 *Withdrawal Request*\n\n` +
-      `Payout receive karne ke liye apna UPI ID bhejiye.\n` +
-      `Example: \`name@bank\`\n\n` +
-      `⚠️ Sahi UPI ID bhejein. Request submit hone ke baad process hone me *minimum 24 hours* lag sakte hain.`,
-      {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [withStyle(Markup.button.callback('❌ Cancel', 'cancel_seller_withdraw_upi'), 'danger')],
-          [withStyle(Markup.button.callback('🎫 Support Chat', 'open_support'), 'primary')],
-        ]),
-      }
-    );
-  };
-
-  bot.action('seller_withdraw', async (ctx) => {
-    await ctx.answerCbQuery('Send your UPI ID');
-    try {
-      await startSellerWithdrawalUpiFlow(ctx);
-    } catch (err) {
-      await ctx.reply(`⚠️ ${err.message}`);
-    }
-  });
-
-  bot.command('sellerwithdraw', async (ctx) => {
-    try {
-      await startSellerWithdrawalUpiFlow(ctx);
-    } catch (err) {
-      await ctx.reply(`⚠️ ${err.message}`);
-    }
-  });
-
-  bot.action('cancel_seller_withdraw_upi', async (ctx) => {
-    await ctx.answerCbQuery('Cancelled');
-    try {
-      await User.findOneAndUpdate(
-        { telegramId: ctx.from.id },
-        { $unset: { 'meta.awaitingSellerWithdrawalUpi': '' } }
-      );
-
-      await ctx.reply(
-        `✅ Withdrawal request process cancelled.`,
-        {
-          parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([
-            [withStyle(Markup.button.callback('🛍 Seller Dashboard', 'seller_program'), 'success')],
-            [withStyle(Markup.button.callback('🎫 Support Chat', 'open_support'), 'primary')],
-          ]),
-        }
-      );
-    } catch (err) {
-      await ctx.reply('❌ Unable to cancel right now. Please try again.');
-    }
+  registerSellerFlow({
+    bot,
+    User,
+    Markup,
+    withStyle,
+    logger,
+    registerSellerProgram,
+    getSellerProgramSummary,
+    getSellerWithdrawalHistory,
+    getSellerPayoutLedgerHistory,
+    formatSellerProgramMessage,
+    sellerProgramKeyboard,
+    buildSetUserFlowUpdate,
+    USER_FLOW_STATE,
   });
 
   // ── Back to main menu (same message) ────────────────────────────────────────
@@ -984,95 +855,23 @@ const registerUserHandlers = (bot) => {
     }
   });
 
-  // ── Renewal (plan select → screenshot → admin approval) ───────────────────
-  bot.action(/^renew_request_(?:(movie|desi|non_desi)_)?(.+)$/, async (ctx) => {
-    await ctx.answerCbQuery('Continue with payment screenshot...');
+  bot.action('request_premium_movie_desi', async (ctx) => {
+    await ctx.answerCbQuery('Submitting...');
     try {
-      const categoryFromCallback = normalizePlanCategory(ctx.match[1] || PLAN_CATEGORY.GENERAL);
-      const planId = ctx.match[2];
-      const user = await findOrCreateUser(ctx.from);
-      await User.findByIdAndUpdate(user._id, { lastInteraction: new Date() });
-
-      const plan = await Plan.findById(planId);
-      if (!plan) return ctx.reply('❌ Plan not found. Please try again.');
-
-      const renewalCategory = normalizePlanCategory(plan.category || categoryFromCallback);
-      if (ctx.match[1] && renewalCategory !== categoryFromCallback) {
-        return ctx.reply('❌ Selected plan category mismatch. Please retry renewal from status.');
-      }
-
-      const activeOrGraceSub = await Subscription.findOne({
-        telegramId: ctx.from.id,
-        status: { $in: ['active', 'grace'] },
-        planCategory: renewalCategory,
-      });
-      if (!activeOrGraceSub) {
-        return ctx.reply(
-          `⚠️ Aapke paas *${escapeMarkdown(getPlanCategoryLabel(renewalCategory))}* ka active/grace subscription nahi hai.\n\n` +
-          `Renew karne ke liye pehle us category ka active plan hona chahiye.`,
-          { parse_mode: 'Markdown' }
-        );
-      }
-
-      const existingPending = await Request.findOne({
-        telegramId: ctx.from.id,
-        status: 'pending',
-        requestCategory: renewalCategory,
-      });
-      if (existingPending) {
-        return ctx.reply(
-          `⏳ *${escapeMarkdown(getPlanCategoryLabel(renewalCategory))} renewal pending hai!*\n\n` +
-          `Admin approval ka wait kijiye.`,
-          { parse_mode: 'Markdown' }
-        );
-      }
-
-      await User.findByIdAndUpdate(
-        user._id,
-        {
-          $set: {
-            'meta.awaitingPaymentScreenshot': true,
-            'meta.paymentCategory': renewalCategory,
-            'meta.paymentFlowType': 'renewal',
-            'meta.renewalPlanId': String(plan._id),
-          },
-          $unset: {
-            'meta.paymentProofReadyForCategory': '',
-            'meta.latestPaymentProof': '',
-          },
-        }
-      );
-
-      const callbackMessageId = ctx.callbackQuery?.message?.message_id;
-      const callbackChatId = ctx.callbackQuery?.message?.chat?.id;
-      const bestOffer = await getBestPublicOffer();
-      const discountedRenewalPrice = bestOffer?.discountPercent > 0
-        ? getDiscountedPrice(plan.price, bestOffer.discountPercent)
-        : plan.price;
-
-      await ctx.reply(
-        `📸 *Renewal Payment Screenshot Upload Karein*\n\n` +
-        `Category: *${escapeMarkdown(getPlanCategoryLabel(renewalCategory))}*\n` +
-        `Plan: *${escapeMarkdown(plan.name)}* (${plan.durationDays} days${plan.price ? ` · ₹${formatInr(plan.price)}` : ''})\n` +
-        (plan.price && bestOffer?.discountPercent > 0
-          ? `🎁 Offer: *${escapeMarkdown(bestOffer.title)}* (${bestOffer.discountPercent}% OFF)\n` +
-          `💰 Payable: *₹${formatInr(discountedRenewalPrice)}*\n\n`
-          : '\n') +
-        `Ab payment screenshot photo/document bhejiye.`,
-        {
-          parse_mode: 'Markdown',
-          ...Markup.inlineKeyboard([
-            [withStyle(Markup.button.callback('❌ Cancel Upload', 'cancel_payment_upload'), 'danger')],
-            [withStyle(Markup.button.callback('🏠 Main Menu', 'back_to_main'), 'primary')],
-          ]),
-        }
-      );
-
-      if (callbackChatId && callbackMessageId) {
-        await ctx.telegram.deleteMessage(callbackChatId, callbackMessageId).catch(() => { });
-      }
+      await submitPremiumRequest(ctx, PLAN_CATEGORY.MOVIE_DESI);
     } catch (err) {
-      logger.error(`renew_request error: ${err.message}`);
+      logger.error(`request_premium_movie_desi error: ${err.message}`);
+      await ctx.reply('❌ Request failed. Please try again.');
+    }
+  });
+
+  bot.action('request_premium_movie_non_desi', async (ctx) => {
+    await ctx.answerCbQuery('Submitting...');
+    try {
+      await submitPremiumRequest(ctx, PLAN_CATEGORY.MOVIE_NON_DESI);
+    } catch (err) {
+      logger.error(`request_premium_movie_non_desi error: ${err.message}`);
+      await ctx.reply('❌ Request failed. Please try again.');
     }
   });
 
@@ -1089,7 +888,13 @@ const registerUserHandlers = (bot) => {
 
       if (activeSubs.length) {
         const activeCategories = [...new Set(activeSubs.map((sub) => normalizePlanCategory(sub.planCategory || 'general')))]
-          .filter((category) => [PLAN_CATEGORY.MOVIE, PLAN_CATEGORY.DESI, PLAN_CATEGORY.NON_DESI].includes(category));
+          .filter((category) => [
+            PLAN_CATEGORY.MOVIE,
+            PLAN_CATEGORY.DESI,
+            PLAN_CATEGORY.NON_DESI,
+            PLAN_CATEGORY.MOVIE_DESI,
+            PLAN_CATEGORY.MOVIE_NON_DESI,
+          ].includes(category));
 
         let message = `📊 *Your Subscription Status*\n\n` +
           `✅ Status: *Active*\n` +
@@ -1167,7 +972,7 @@ const registerUserHandlers = (bot) => {
     await showStatus(ctx);
   });
 
-  bot.action(/^status_renew_(movie|desi|non_desi)$/, async (ctx) => {
+  bot.action(/^status_renew_(movie|desi|non_desi|movie_desi|movie_non_desi)$/, async (ctx) => {
     await ctx.answerCbQuery();
     try {
       const category = normalizePlanCategory(ctx.match[1]);
@@ -1287,8 +1092,7 @@ const registerUserHandlers = (bot) => {
   });
 
   // ── View Offers ────────────────────────────────────────────────────────────
-  bot.action('view_offers', async (ctx) => {
-    await ctx.answerCbQuery();
+  const showCurrentOffers = async (ctx) => {
     try {
       await User.findOneAndUpdate({ telegramId: ctx.from.id }, { lastInteraction: new Date() });
       const offers = await getActiveOffers();
@@ -1335,6 +1139,15 @@ const registerUserHandlers = (bot) => {
     } catch (err) {
       logger.error(`view_offers error: ${err.message}`);
     }
+  };
+
+  bot.action('view_offers', async (ctx) => {
+    await ctx.answerCbQuery();
+    await showCurrentOffers(ctx);
+  });
+
+  bot.command('offers', async (ctx) => {
+    await showCurrentOffers(ctx);
   });
 
   // ── My Referral Link ───────────────────────────────────────────────────────
@@ -1349,7 +1162,7 @@ const registerUserHandlers = (bot) => {
       await ctx.reply(
         `🤝 *Referral Program*\n\n` +
         `Share your link with friends.\n` +
-        `When they subscribe, you earn *+${process.env.BONUS_REFERRAL_DAYS || 3} free days*!\n\n` +
+        `When they subscribe, you earn *${REFERRAL_REWARD_DISCOUNT_PERCENT}% OFF* for your next premium purchase/renewal!\n\n` +
         `🔗 *Your Link:*\n\`${link}\`\n\n` +
         `👥 Friends Referred: *${count}*`,
         { parse_mode: 'Markdown' }
@@ -1365,7 +1178,9 @@ const registerUserHandlers = (bot) => {
     const link = `https://t.me/${botInfo.username}?start=ref_${user.referralCode}`;
     const count = await User.countDocuments({ referredBy: ctx.from.id });
     await ctx.reply(
-      `🤝 *Your Referral Link*\n\n\`${link}\`\n\n👥 Referrals: *${count}*`,
+      `🤝 *Your Referral Link*\n\n` +
+      `Reward: *${REFERRAL_REWARD_DISCOUNT_PERCENT}% OFF* on next premium purchase/renewal\n\n` +
+      `\`${link}\`\n\n👥 Referrals: *${count}*`,
       { parse_mode: 'Markdown' }
     );
   });
@@ -1442,277 +1257,6 @@ const registerUserHandlers = (bot) => {
 
   bot.command('support', openSupportChat);
 
-  const onPaymentProofReceived = async (ctx, sourceType) => {
-    if (ctx.chat?.type !== 'private') return;
-
-    const userDoc = await User.findOne({ telegramId: ctx.from.id });
-    if (!userDoc?.meta?.awaitingPaymentScreenshot) return;
-
-    const category = normalizePlanCategory(userDoc?.meta?.paymentCategory);
-    const paymentFlowType = String(userDoc?.meta?.paymentFlowType || 'new_request');
-    const renewalPlanId = userDoc?.meta?.renewalPlanId || null;
-    const categoryLabel = getPlanCategoryLabel(category);
-    const safeName = escapeMarkdown(userDoc.name || ctx.from.first_name || 'User');
-    const safeUsername = userDoc.username ? `@${escapeMarkdown(userDoc.username)}` : 'N/A';
-
-    let fileId;
-    let fileUniqueId;
-
-    if (sourceType === 'photo') {
-      const photos = ctx.message?.photo || [];
-      const bestPhoto = photos[photos.length - 1];
-      fileId = bestPhoto?.file_id;
-      fileUniqueId = bestPhoto?.file_unique_id;
-    } else {
-      fileId = ctx.message?.document?.file_id;
-      fileUniqueId = ctx.message?.document?.file_unique_id;
-    }
-
-    if (!fileId) {
-      await ctx.reply('❌ Invalid screenshot. Please send a clear image.');
-      return;
-    }
-
-    let proofLogMessageId = null;
-    try {
-      const caption =
-        `🧾 *Payment Screenshot Submitted*\n\n` +
-        `📦 Category: *${escapeMarkdown(categoryLabel)}*\n` +
-        `👤 Name: ${safeName}\n` +
-        `🆔 User ID: \`${ctx.from.id}\`\n` +
-        `📛 Username: ${safeUsername}\n` +
-        `🕒 Time: ${new Date().toLocaleString('en-IN')}`;
-
-      const logMessage = sourceType === 'photo'
-        ? await bot.telegram.sendPhoto(process.env.LOG_CHANNEL_ID, fileId, { caption, parse_mode: 'Markdown' })
-        : await bot.telegram.sendDocument(process.env.LOG_CHANNEL_ID, fileId, { caption, parse_mode: 'Markdown' });
-
-      proofLogMessageId = logMessage?.message_id || null;
-    } catch (err) {
-      logger.error(`payment proof log error: ${err.message}`);
-    }
-
-    if (paymentFlowType === 'renewal' && renewalPlanId) {
-      const user = await findOrCreateUser(ctx.from);
-      const plan = await Plan.findById(renewalPlanId);
-      if (!plan) {
-        await User.findOneAndUpdate(
-          { telegramId: ctx.from.id },
-          {
-            $set: { 'meta.awaitingPaymentScreenshot': false },
-            $unset: {
-              'meta.paymentCategory': '',
-              'meta.paymentFlowType': '',
-              'meta.renewalPlanId': '',
-            },
-          }
-        );
-        await ctx.reply('❌ Renewal plan not found. Please open status and retry renewal.');
-        return;
-      }
-
-      const renewalCategory = normalizePlanCategory(plan.category || category);
-      if (renewalCategory !== category) {
-        await User.findOneAndUpdate(
-          { telegramId: ctx.from.id },
-          {
-            $set: { 'meta.awaitingPaymentScreenshot': false },
-            $unset: {
-              'meta.paymentCategory': '',
-              'meta.paymentFlowType': '',
-              'meta.renewalPlanId': '',
-            },
-          }
-        );
-        await ctx.reply('❌ Renewal category mismatch. Please retry renewal from status.');
-        return;
-      }
-
-      const existingPending = await Request.findOne({
-        telegramId: ctx.from.id,
-        status: 'pending',
-        requestCategory: renewalCategory,
-      });
-      if (existingPending) {
-        await User.findOneAndUpdate(
-          { telegramId: ctx.from.id },
-          {
-            $set: { 'meta.awaitingPaymentScreenshot': false },
-            $unset: {
-              'meta.paymentCategory': '',
-              'meta.paymentFlowType': '',
-              'meta.renewalPlanId': '',
-            },
-          }
-        );
-        await ctx.reply(
-          `⏳ *${escapeMarkdown(getPlanCategoryLabel(renewalCategory))} renewal pending hai!*\n\n` +
-          `Admin approval ka wait kijiye.`,
-          { parse_mode: 'Markdown' }
-        );
-        return;
-      }
-
-      const renewalReq = await Request.create({
-        userId: user._id,
-        telegramId: ctx.from.id,
-        status: 'pending',
-        requestCategory: renewalCategory,
-        selectedPlanId: plan._id,
-        paymentProof: {
-          fileId,
-          fileUniqueId,
-          sourceType,
-          logMessageId: proofLogMessageId,
-        },
-      });
-
-      const consumedOffer = await consumeOneTimeUserOffer(ctx.from.id, renewalReq._id);
-      const bestOffer = await getBestPublicOffer();
-      if (consumedOffer) {
-        await Request.findByIdAndUpdate(renewalReq._id, {
-          appliedUserOffer: {
-            offerId: consumedOffer._id,
-            title: consumedOffer.title,
-            discountPercent: consumedOffer.discountPercent,
-          },
-        });
-      }
-
-      await User.findByIdAndUpdate(user._id, {
-        $set: { 'meta.awaitingPaymentScreenshot': false },
-        $unset: {
-          'meta.latestPaymentProof': '',
-          'meta.paymentProofReadyForCategory': '',
-          'meta.paymentCategory': '',
-          'meta.paymentFlowType': '',
-          'meta.renewalPlanId': '',
-        },
-      });
-
-      await ctx.reply(
-        `✅ *${escapeMarkdown(categoryLabel)} renewal request submitted!*\n\n` +
-        `📋 Plan: *${escapeMarkdown(plan.name)}* (${plan.durationDays} days${plan.price ? ` · ₹${formatInr(plan.price)}` : ''})\n` +
-        (plan.price && bestOffer?.discountPercent > 0
-          ? `🎁 *Public offer applied:* ${escapeMarkdown(bestOffer.title)} (${bestOffer.discountPercent}% OFF)\n` +
-          `💰 Price: ~₹${formatInr(plan.price)}~ → *₹${formatInr(getDiscountedPrice(plan.price, bestOffer.discountPercent))}*\n\n`
-          : '\n') +
-        (consumedOffer
-          ? `🎁 *Private offer applied:* ${escapeMarkdown(consumedOffer.title)}${consumedOffer.discountPercent > 0 ? ` (*${consumedOffer.discountPercent}% OFF*)` : ''}\n\n`
-          : '') +
-        `Admin screenshot verify karke approval denge. Approval ke baad isi category plan me days add honge.`,
-        { parse_mode: 'Markdown' }
-      );
-
-      const safePlanName = escapeMarkdown(plan.name);
-      const logMsg = await bot.telegram.sendMessage(
-        process.env.LOG_CHANNEL_ID,
-        `🔄 *Renewal Request*\n\n` +
-        `📦 Category: *${escapeMarkdown(categoryLabel)}*\n` +
-        `👤 Name: ${safeName}\n` +
-        `🆔 ID: \`${ctx.from.id}\`\n` +
-        `📛 Username: ${safeUsername}\n` +
-        (plan.price && bestOffer?.discountPercent > 0
-          ? `🎁 Public Offer: *${escapeMarkdown(bestOffer.title)}* (${bestOffer.discountPercent}% OFF)\n` +
-          `💰 Price: ~₹${formatInr(plan.price)}~ → *₹${formatInr(getDiscountedPrice(plan.price, bestOffer.discountPercent))}*\n`
-          : '') +
-        (consumedOffer
-          ? `🎁 Private Offer: *${escapeMarkdown(consumedOffer.title)}*${consumedOffer.discountPercent > 0 ? ` (*${consumedOffer.discountPercent}% OFF*)` : ''}\n`
-          : '') +
-        `📋 Plan: ${safePlanName} (${plan.durationDays} days${plan.price ? ` · ₹${formatInr(plan.price)}` : ''})\n` +
-        `🧾 Payment Proof Log Msg: \`${proofLogMessageId || 'N/A'}\`\n` +
-        `🕒 Time: ${new Date().toLocaleString('en-IN')}`,
-        {
-          parse_mode: 'Markdown',
-          reply_markup: {
-            inline_keyboard: [[
-              withStyle({ text: '✅ Approve', callback_data: `approve_${renewalReq._id}_${plan._id}` }, 'success'),
-              withStyle({ text: '❌ Reject', callback_data: `reject_${renewalReq._id}` }, 'danger'),
-            ]],
-          },
-        }
-      );
-
-      await Request.findByIdAndUpdate(renewalReq._id, { logMessageId: logMsg.message_id });
-      return;
-    }
-
-    await User.findOneAndUpdate(
-      { telegramId: ctx.from.id },
-      {
-        $set: {
-          'meta.awaitingPaymentScreenshot': true,
-          'meta.paymentProofReadyForCategory': category,
-          'meta.latestPaymentProof': {
-            fileId,
-            fileUniqueId,
-            sourceType,
-            logMessageId: proofLogMessageId,
-            category,
-            uploadedAt: new Date(),
-          },
-        },
-      }
-    );
-
-    await submitPremiumRequest(ctx, category);
-    return;
-  };
-
-  const maybePromptCheckPlansBeforeScreenshot = async (ctx) => {
-    if (ctx.chat?.type !== 'private') return false;
-
-    const userId = ctx.from?.id;
-    if (!userId) return false;
-
-    const userDoc = await User.findOne({ telegramId: userId });
-    if (userDoc?.meta?.awaitingPaymentScreenshot) return false;
-
-    const isAwaitingSupport = userDoc?.meta?.awaitingSupport === true;
-    if (isAwaitingSupport) return false;
-
-    const activeTicket = await getActiveTicket(userId);
-    if (activeTicket) return false;
-
-    await ctx.reply(
-      `⚠️ Screenshot upload karne se pehle *Check Plans* me category select karein.\n\n` +
-      `Flow: *Check Plans* → category choose karein → *Paid* dabayein → screenshot upload karein.`,
-      {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [withStyle(Markup.button.callback('📋 Check Plans', 'check_plans'), 'success')],
-          [withStyle(Markup.button.callback('🏠 Main Menu', 'back_to_main'), 'primary')],
-        ]),
-      }
-    );
-
-    return true;
-  };
-
-  bot.on('photo', async (ctx, next) => {
-    try {
-      if (await maybePromptCheckPlansBeforeScreenshot(ctx)) return next();
-      await onPaymentProofReceived(ctx, 'photo');
-    } catch (err) {
-      logger.error(`payment proof photo handler error: ${err.message}`);
-      await ctx.reply('❌ Screenshot process failed. Please try again.');
-    }
-    return next();
-  });
-
-  bot.on('document', async (ctx, next) => {
-    try {
-      const mime = String(ctx.message?.document?.mime_type || '').toLowerCase();
-      if (!mime.startsWith('image/')) return next();
-      if (await maybePromptCheckPlansBeforeScreenshot(ctx)) return next();
-      await onPaymentProofReceived(ctx, 'document');
-    } catch (err) {
-      logger.error(`payment proof document handler error: ${err.message}`);
-      await ctx.reply('❌ Screenshot process failed. Please try again.');
-    }
-    return next();
-  });
-
   const closeSupportChat = async (ctx) => {
     const userId = ctx.from.id;
     try {
@@ -1767,49 +1311,24 @@ const registerUserHandlers = (bot) => {
 
       // Check if user is awaiting support (about to create ticket)
       const userDoc = await User.findOne({ telegramId: userId });
-      if (userDoc?.meta?.awaitingSellerWithdrawalUpi) {
-        const upiId = String(message?.text || '').trim().toLowerCase();
-        if (!upiId) {
-          return ctx.reply('⚠️ UPI ID text me bhejiye. Example: `name@bank`', { parse_mode: 'Markdown' });
-        }
+      const flowState = getUserFlowState(userDoc);
 
-        let req;
-        try {
-          req = await requestSellerWithdrawal(ctx.from.id, upiId);
-        } catch (err) {
-          const errMsg = String(err?.message || 'Unable to create withdrawal request.');
-          if (errMsg.toLowerCase().includes('invalid upi id format')) {
-            return ctx.reply('⚠️ Invalid UPI ID format. Example: `name@bank`', { parse_mode: 'Markdown' });
-          }
-          if (errMsg.toLowerCase().includes('upi id is required')) {
-            return ctx.reply('⚠️ UPI ID required hai. Example: `name@bank`', { parse_mode: 'Markdown' });
-          }
-
-          await User.findOneAndUpdate(
-            { telegramId: userId },
-            { $unset: { 'meta.awaitingSellerWithdrawalUpi': '' } }
-          );
-          return ctx.reply(`⚠️ ${errMsg}`);
-        }
-
-        await User.findOneAndUpdate(
-          { telegramId: userId },
-          { $unset: { 'meta.awaitingSellerWithdrawalUpi': '' } }
-        );
-
-        await notifySellerWithdrawalRequest(bot, ctx, req);
-        await ctx.reply(
-          `✅ *Withdrawal Request Submitted*\n\n` +
-          `Request ID: \`${req._id}\`\n` +
-          `UPI ID: \`${req.upiId}\`\n` +
-          `Amount: *₹${Number(req.amount).toFixed(2)}*\n\n` +
-          `⏱ Withdrawal process hone me *minimum 24 hours* lag sakte hain.`,
-          { parse_mode: 'Markdown' }
-        );
-        return;
+      if (flowState === USER_FLOW_STATE.AWAITING_SELLER_UPI) {
+        const handled = await handleSellerWithdrawalUpiMessage({
+          ctx,
+          userId,
+          message,
+          requestSellerWithdrawal,
+          User,
+          buildSetUserFlowUpdate,
+          USER_FLOW_STATE,
+          notifySellerWithdrawalRequest,
+          bot,
+        });
+        if (handled) return;
       }
 
-      if (userDoc?.meta?.awaitingPaymentScreenshot) {
+      if (flowState === USER_FLOW_STATE.AWAITING_PAYMENT_SCREENSHOT) {
         if (!message?.text) return next();
         return ctx.reply(
           `📸 Aap payment screenshot upload mode me hain.\n\n` +

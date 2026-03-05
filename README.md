@@ -11,7 +11,7 @@ Production-ready Telegram bot with advanced subscription management, referrals, 
 | Smart Reminders | Alerts at 7, 3, 1 day before expiry + expiry day |
 | One-Click Renewal | Inline renewal buttons in every reminder |
 | Grace Period | 3-day window after expiry with daily warnings before ban |
-| Referral System | Unique codes, bonus days for referrer on first sub |
+| Referral System | Unique codes, discount reward for referrer on first sub |
 | Anti-Link Protection | Invite links: 1 use, 10-minute expiry |
 | Membership Monitor | Daily check: resend invites / remove expired users |
 | Block Detection | 403 errors update user status + log to channel |
@@ -53,14 +53,34 @@ npm start
 |---|---|---|
 | `BOT_TOKEN` | ✅ | From @BotFather |
 | `MONGO_URI` | ✅ | MongoDB connection string |
-| `PREMIUM_GROUP_ID` | ✅ | Group ID (negative number) |
 | `LOG_CHANNEL_ID` | ✅ | Log channel ID (negative number) |
 | `SUPER_ADMIN_IDS` | ✅ | Comma-separated Telegram user IDs for super admins (e.g. `123,456`) |
-| `BONUS_REFERRAL_DAYS` | ❌ | Default: 3 |
+| `MOVIE_PREMIUM_GROUP_ID` | ✅* | Movie premium group ID |
+| `DESI_PREMIUM_GROUP_ID` | ✅* | Desi premium group ID |
+| `NON_DESI_PREMIUM_GROUP_ID` | ✅* | Non-desi premium group ID |
+| `PREMIUM_GROUP_ID` | ❌ | Optional fallback/general group ID |
+| `SUPPORT_GROUP_ID` | ❌ | Forum-enabled support group ID |
+| `SUPPORT_CONTACT` | ❌ | Support bot/handle shown in user messages |
+| `INVITE_LINK_TTL_MINUTES` | ❌ | Default: 10 |
+| `REFERRAL_REWARD_DISCOUNT_PERCENT` | ❌ | Default: 10 |
 | `GRACE_PERIOD_DAYS` | ❌ | Default: 3 |
+| `REJOINING_PENALTY` | ❌ | Default: 20 |
+| `SELLER_COMMISSION_PERCENT` | ❌ | Default: 15 |
+| `SELLER_MIN_WITHDRAW_REFERRALS` | ❌ | Default: 10 |
+| `SELLER_MIN_WITHDRAW_BALANCE` | ❌ | Default: 200 |
+| `SELLER_WITHDRAW_MIN_PROCESS_HOURS` | ❌ | Default: 24 |
+| `SELLER_PAYOUT_HISTORY_LIMIT` | ❌ | Default: 10 |
+| `PAYMENT_PROOF_SPAM_WINDOW_MINUTES` | ❌ | Default: 10 |
+| `PAYMENT_PROOF_MAX_ATTEMPTS` | ❌ | Default: 5 |
+| `PAYMENT_PROOF_COOLDOWN_MINUTES` | ❌ | Default: 30 |
+| `PENDING_REQUEST_REMINDER_AFTER_HOURS` | ❌ | Default: 2 |
+| `PENDING_REQUEST_REMINDER_REPEAT_HOURS` | ❌ | Default: 12 |
+| `PROTECT_BOT_MESSAGES` | ❌ | Default: true |
 | `CRON_TIMEZONE` | ❌ | Cron timezone (IANA), default: `Asia/Kolkata` |
 | `REMINDER_CRON_SCHEDULES` | ❌ | Comma-separated cron expressions for reminders, default: `0 8 * * *,0 20 * * *` |
 | `PORT` | ❌ | Health check port |
+
+\* At least one premium group must exist; for category routing, configure all three category group IDs.
 
 ---
 
@@ -168,7 +188,7 @@ Configure with `GRACE_PERIOD_DAYS=3` in `.env`.
 
 1. User gets unique referral link: `t.me/yourbot?start=ref_ABCD1234`
 2. New user clicks link → `referredBy` is stored
-3. When new user gets their **first** subscription approved → referrer earns `BONUS_REFERRAL_DAYS` extra days
+3. When new user gets their **first** subscription approved → referrer earns `REFERRAL_REWARD_DISCOUNT_PERCENT` one-time discount on next purchase/renewal
 
 ---
 

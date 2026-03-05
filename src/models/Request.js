@@ -32,6 +32,11 @@ const requestSchema = new mongoose.Schema({
     type: Number, // admin/superadmin telegramId
     default: null,
   },
+  pendingReminderAt: {
+    type: Date,
+    default: null,
+    index: true,
+  },
   selectedPlanId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Plan',
@@ -39,7 +44,7 @@ const requestSchema = new mongoose.Schema({
   },
   requestCategory: {
     type: String,
-    enum: ['movie', 'desi', 'non_desi', 'general'],
+    enum: ['movie', 'desi', 'non_desi', 'movie_desi', 'movie_non_desi', 'general'],
     default: 'general',
     index: true,
   },

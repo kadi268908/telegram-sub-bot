@@ -1,19 +1,21 @@
 // src/services/referralService.js
-// Handles referral code generation, tracking, and bonus day awarding
+// Handles referral code generation, tracking, and referral/seller rewards
 
 const User = require('../models/User');
 const Subscription = require('../models/Subscription');
+const UserOffer = require('../models/UserOffer');
 const AdminLog = require('../models/AdminLog');
 const SellerWithdrawalRequest = require('../models/SellerWithdrawalRequest');
-const { addDays } = require('../utils/dateUtils');
+const SellerPayoutLedger = require('../models/SellerPayoutLedger');
 const logger = require('../utils/logger');
 
-const BONUS_DAYS = parseInt(process.env.BONUS_REFERRAL_DAYS) || 3;
+const REFERRAL_REWARD_DISCOUNT_PERCENT = Math.min(100, Math.max(0, parseFloat(process.env.REFERRAL_REWARD_DISCOUNT_PERCENT || '10')));
 const SELLER_COMMISSION_PERCENT = parseFloat(process.env.SELLER_COMMISSION_PERCENT || '15');
 const SELLER_MIN_WITHDRAW_REFERRALS = parseInt(process.env.SELLER_MIN_WITHDRAW_REFERRALS || '10', 10);
 const SELLER_MIN_WITHDRAW_BALANCE = parseFloat(process.env.SELLER_MIN_WITHDRAW_BALANCE || '200');
 const SELLER_WITHDRAW_MIN_PROCESS_HOURS = parseInt(process.env.SELLER_WITHDRAW_MIN_PROCESS_HOURS || '24', 10);
 const UPI_ID_REGEX = /^[a-zA-Z0-9._-]{2,}@[a-zA-Z]{2,}$/;
+const SELLER_PAYOUT_HISTORY_LIMIT = parseInt(process.env.SELLER_PAYOUT_HISTORY_LIMIT || '10', 10);
 
 const getWithdrawalApprovalAllowedAt = (requestedAt) => {
   const hours = Number.isFinite(SELLER_WITHDRAW_MIN_PROCESS_HOURS) ? SELLER_WITHDRAW_MIN_PROCESS_HOURS : 24;
@@ -66,7 +68,8 @@ const processReferral = async (newUser, referralCode) => {
 };
 
 /**
- * Award bonus days to referrer when referred user gets their FIRST approved subscription
+ * Award referral discount coupon to referrer when referred user gets their FIRST approved subscription.
+ * Coupon auto-applies on next request/renewal via UserOffer consumption flow.
  */
 const awardReferralBonus = async (bot, newSubscriberTelegramId) => {
   try {
@@ -83,23 +86,26 @@ const awardReferralBonus = async (bot, newSubscriberTelegramId) => {
     const referrer = await User.findOne({ telegramId: newUser.referredBy });
     if (!referrer) return;
 
-    // Find referrer's active subscription and extend it
-    const referrerSub = await Subscription.findOne({
-      telegramId: referrer.telegramId,
-      status: 'active',
-      expiryDate: { $gt: new Date() },
-    });
+    if (REFERRAL_REWARD_DISCOUNT_PERCENT > 0) {
+      const validTill = new Date();
+      validTill.setFullYear(validTill.getFullYear() + 10);
 
-    if (referrerSub) {
-      const newExpiry = addDays(referrerSub.expiryDate, BONUS_DAYS);
-      await Subscription.findByIdAndUpdate(referrerSub._id, { expiryDate: newExpiry });
+      await UserOffer.create({
+        targetTelegramId: referrer.telegramId,
+        title: 'Referral Reward',
+        description: `Referral reward from ${newUser.name} subscription`,
+        discountPercent: REFERRAL_REWARD_DISCOUNT_PERCENT,
+        validTill,
+        isActive: true,
+        isUsed: false,
+        createdBy: 0,
+      });
 
-      // Notify referrer
       try {
         await bot.telegram.sendMessage(
           referrer.telegramId,
-          `🎁 *Referral Bonus!*\n\nYour referral *${newUser.name}* just subscribed!\n` +
-          `+${BONUS_DAYS} bonus days added to your subscription. 🎉`,
+          `🎁 *Referral Reward Unlocked!*\n\nYour referral *${newUser.name}* just subscribed!\n` +
+          `You earned *${REFERRAL_REWARD_DISCOUNT_PERCENT}% OFF* on your next premium purchase/renewal. 🎉`,
           { parse_mode: 'Markdown' }
         );
       } catch (_) { }
@@ -113,11 +119,12 @@ const awardReferralBonus = async (bot, newSubscriberTelegramId) => {
       targetUserId: referrer.telegramId,
       details: {
         referredUser: newSubscriberTelegramId,
-        bonusDays: BONUS_DAYS,
+        rewardType: 'discount_percent',
+        discountPercent: REFERRAL_REWARD_DISCOUNT_PERCENT,
       },
     });
 
-    logger.info(`Referral bonus: ${BONUS_DAYS} days awarded to ${referrer.telegramId}`);
+    logger.info(`Referral reward: ${REFERRAL_REWARD_DISCOUNT_PERCENT}% coupon awarded to ${referrer.telegramId}`);
   } catch (err) {
     logger.error(`awardReferralBonus error: ${err.message}`);
   }
@@ -198,6 +205,18 @@ const awardSellerCommission = async (bot, newSubscriberTelegramId, saleValue = 0
         'sellerStats.lifetimeEarnings': commission,
         'sellerStats.availableBalance': commission,
       },
+    });
+
+    const updatedSeller = await User.findById(seller._id).select('sellerStats.availableBalance').lean();
+    await SellerPayoutLedger.create({
+      sellerTelegramId: seller.telegramId,
+      entryType: 'credit',
+      source: 'commission',
+      amount: commission,
+      balanceAfter: Number(updatedSeller?.sellerStats?.availableBalance || 0),
+      relatedUserTelegramId: newSubscriberTelegramId,
+      note: `Commission from referral subscription: ${newSubscriberTelegramId}`,
+      createdBy: 0,
     });
 
     await User.findByIdAndUpdate(newUser._id, { sellerCommissionApplied: true });
@@ -313,10 +332,36 @@ const requestSellerWithdrawal = async (telegramId, upiIdRaw) => {
   return request;
 };
 
-const getPendingSellerWithdrawalRequests = async (limit = 20) => {
-  return SellerWithdrawalRequest.find({ status: 'pending' })
+const getSellerWithdrawalRequests = async ({ status = 'pending', limit = 20, sellerTelegramId = null } = {}) => {
+  const query = {};
+  if (status && status !== 'all') {
+    query.status = status;
+  }
+  if (sellerTelegramId) {
+    query.sellerTelegramId = Number(sellerTelegramId);
+  }
+
+  return SellerWithdrawalRequest.find(query)
     .sort({ requestedAt: 1 })
     .limit(limit);
+};
+
+const getPendingSellerWithdrawalRequests = async (limit = 20) => {
+  return getSellerWithdrawalRequests({ status: 'pending', limit });
+};
+
+const getSellerWithdrawalHistory = async (sellerTelegramId, limit = SELLER_PAYOUT_HISTORY_LIMIT) => {
+  return SellerWithdrawalRequest.find({ sellerTelegramId })
+    .sort({ requestedAt: -1 })
+    .limit(limit)
+    .lean();
+};
+
+const getSellerPayoutLedgerHistory = async (sellerTelegramId, limit = SELLER_PAYOUT_HISTORY_LIMIT) => {
+  return SellerPayoutLedger.find({ sellerTelegramId })
+    .sort({ createdAt: -1 })
+    .limit(limit)
+    .lean();
 };
 
 const approveSellerWithdrawal = async (requestId, adminTelegramId) => {
@@ -371,6 +416,17 @@ const approveSellerWithdrawal = async (requestId, adminTelegramId) => {
       latest.reviewedAt = new Date();
       latest.reviewedBy = adminTelegramId;
       await latest.save({ session });
+
+      await SellerPayoutLedger.create([{
+        sellerTelegramId: latest.sellerTelegramId,
+        entryType: 'debit',
+        source: 'withdrawal_approved',
+        amount: latest.amount,
+        balanceAfter: Number(seller?.sellerStats?.availableBalance || 0),
+        relatedWithdrawalRequestId: latest._id,
+        note: `Withdrawal approved to UPI ${latest.upiId || 'N/A'}`,
+        createdBy: adminTelegramId,
+      }], { session });
 
       await AdminLog.create([{
         adminId: adminTelegramId,
@@ -449,6 +505,17 @@ const approveSellerWithdrawal = async (requestId, adminTelegramId) => {
       details: { requestId: marked._id, amount: marked.amount, upiId: marked.upiId || null },
     });
 
+    await SellerPayoutLedger.create({
+      sellerTelegramId: marked.sellerTelegramId,
+      entryType: 'debit',
+      source: 'withdrawal_approved',
+      amount: marked.amount,
+      balanceAfter: Number(seller?.sellerStats?.availableBalance || 0),
+      relatedWithdrawalRequestId: marked._id,
+      note: `Withdrawal approved to UPI ${marked.upiId || 'N/A'}`,
+      createdBy: adminTelegramId,
+    });
+
     approvedRequest = marked;
   } finally {
     await session.endSession();
@@ -488,7 +555,10 @@ module.exports = {
   awardSellerCommission,
   getSellerProgramSummary,
   requestSellerWithdrawal,
+  getSellerWithdrawalRequests,
   getPendingSellerWithdrawalRequests,
+  getSellerWithdrawalHistory,
+  getSellerPayoutLedgerHistory,
   approveSellerWithdrawal,
   rejectSellerWithdrawal,
 };
