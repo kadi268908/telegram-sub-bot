@@ -1,4 +1,4 @@
-# Telegram Subscription Bot v2.0
+# Telegram Subscription Bot v5.0
 
 Production-ready Telegram bot for paid premium access management with category-wise plans, request approval workflows, renewals, referrals, seller commissions, support tickets, anti-fraud controls, analytics, and scheduled automations.
 
