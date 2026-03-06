@@ -164,7 +164,7 @@ bot.command('help', async (ctx) => {
   }
   if (role === 'superadmin') {
     msg += `\n*Super Admin:*\n/addadmin <id> /removeadmin <id> /admins\n` +
-      `/createplan /editplan /deleteplan /pauseplan /listplans\n` +
+      `/createplan /editplan /deleteplan /pauseplan /resumeplan /listplans\n` +
       `/addoffer /deleteoffer /listoffers\n` +
       `/broadcast — Broadcast to users\n` +
       `/bcancel — Cancel active broadcast compose session\n` +

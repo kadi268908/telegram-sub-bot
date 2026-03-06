@@ -150,6 +150,40 @@ const registerSuperAdminHandlers = (bot) => {
     } catch (err) { await ctx.reply(`❌ ${err.message}`); }
   });
 
+  bot.command('resumeplan', requireSuperAdmin, async (ctx) => {
+    const planId = ctx.message.text.split(' ')[1];
+    if (!planId) return ctx.reply('Usage: /resumeplan <planId>');
+
+    try {
+      const plan = await Plan.findById(planId);
+      if (!plan) {
+        return ctx.reply('❌ Plan not found.');
+      }
+
+      if (plan.isActive) {
+        return ctx.reply(`ℹ️ Plan *${plan.name}* is already active.`, { parse_mode: 'Markdown' });
+      }
+
+      plan.isActive = true;
+      await plan.save();
+
+      await AdminLog.create({
+        adminId: ctx.from.id,
+        actionType: 'edit_plan',
+        details: {
+          planId: plan._id,
+          field: 'isActive',
+          value: true,
+          command: 'resumeplan',
+        },
+      });
+
+      await ctx.reply(`✅ Plan *${plan.name}* resumed and set to ✅ Active.`, { parse_mode: 'Markdown' });
+    } catch (err) {
+      await ctx.reply(`❌ ${err.message}`);
+    }
+  });
+
   bot.command('listplans', requireSuperAdmin, async (ctx) => {
     const plans = await getAllPlans();
     if (!plans.length) return ctx.reply('No plans found.');
