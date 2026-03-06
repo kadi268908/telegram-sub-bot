@@ -31,7 +31,7 @@ The project includes:
 
 ## Key Features
 
-- Category-based plan system: `movie`, `desi`, `non_desi`, `movie_desi`, `movie_non_desi`, `general`
+- Category-based plan system: `movie`, `2`, `3`, `4`, `5`, `general`
 - Screenshot-based payment proof submission
 - Admin approval/rejection in log channel via inline buttons
 - Renewal flow with category-aware checks
@@ -155,15 +155,15 @@ If using support topics, `SUPPORT_GROUP_ID` should be a forum-enabled Telegram g
 | `MONGO_URI` | MongoDB connection URI |
 | `LOG_CHANNEL_ID` | Telegram channel/group ID for moderation logs |
 | `SUPER_ADMIN_IDS` or `SUPER_ADMIN_ID` | Superadmin Telegram IDs |
-| One premium group ID | At least one of `MOVIE_PREMIUM_GROUP_ID`, `DESI_PREMIUM_GROUP_ID`, `NON_DESI_PREMIUM_GROUP_ID`, `PREMIUM_GROUP_ID` |
+| One premium group ID | At least one of `1_MOVIE_PREMIUM_GROUP_ID`, `2_PREMIUM_GROUP_ID`, `3_PREMIUM_GROUP_ID`, `PREMIUM_GROUP_ID` |
 
 ### Premium group routing
 
 | Variable | Purpose |
 |---|---|
 | `MOVIE_PREMIUM_GROUP_ID` | Movie category premium group |
-| `DESI_PREMIUM_GROUP_ID` | Desi category premium group |
-| `NON_DESI_PREMIUM_GROUP_ID` | Non-desi category premium group |
+| `2_PREMIUM_GROUP_ID` | 1 category premium group |
+| `3_PREMIUM_GROUP_ID` | 2 category premium group |
 | `PREMIUM_GROUP_ID` | General fallback premium group |
 
 ### Support and runtime
