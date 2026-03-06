@@ -29,6 +29,10 @@ const REMINDER_CRON_SCHEDULES = (process.env.REMINDER_CRON_SCHEDULES || '15 9 * 
   .split(',')
   .map((schedule) => schedule.trim())
   .filter(Boolean);
+const GRACE_REMINDER_CRON_SCHEDULES = (process.env.GRACE_REMINDER_CRON_SCHEDULES || '0 8 * * *,0 14 * * *,30 20 * * *')
+  .split(',')
+  .map((schedule) => schedule.trim())
+  .filter(Boolean);
 const PENDING_REQUEST_REMINDER_AFTER_HOURS = Math.max(1, parseInt(process.env.PENDING_REQUEST_REMINDER_AFTER_HOURS || '2', 10));
 const PENDING_REQUEST_REMINDER_REPEAT_HOURS = Math.max(1, parseInt(process.env.PENDING_REQUEST_REMINDER_REPEAT_HOURS || '12', 10));
 
@@ -236,12 +240,21 @@ const gracePeriodHandler = async (bot) => {
     await sub.save();
     await User.findOneAndUpdate({ telegramId: sub.telegramId }, { status: 'expired', graceDaysRemaining: GRACE_DAYS });
 
+    let renewalPlans = [];
+    if (sub.planId) {
+      const samePlan = await Plan.find({ _id: sub.planId, isActive: true });
+      renewalPlans = samePlan;
+    }
+    if (!renewalPlans.length) {
+      renewalPlans = await getRenewalPlansByCategory(sub.planCategory || 'general');
+    }
+
     await safeSend(bot, sub.telegramId,
       `❌ *Subscription Expired*\n\nYour subscription expired on *${formatDate(sub.expiryDate)}*.\n\n` +
       `⏳ You have a ${GRACE_DAYS}-day grace period. Renew now to keep your access!`,
       {
         parse_mode: 'Markdown',
-        reply_markup: renewalKeyboard(await Plan.find({ isActive: true })),
+        ...(renewalPlans.length ? { reply_markup: renewalKeyboard(renewalPlans) } : {}),
       }
     );
 
@@ -283,7 +296,7 @@ const gracePeriodHandler = async (bot) => {
         details: { reason: 'Grace period expired', daysOverdue: daysSinceExpiry },
       });
 
-    } else if (daysSinceExpiry === GRACE_DAYS - 1 && !sub.graceNotifications.day2) {
+    } else if (daysSinceExpiry === GRACE_DAYS - 1) {
       const plans = await getRenewalPlansByCategory(sub.planCategory || 'general');
       await safeSend(bot, sub.telegramId,
         `🔴 *Final Warning!*\n\nYou will be removed from the Premium Group in *1 day* if you don't renew.\n\nRenew now to keep access!`,
@@ -292,10 +305,8 @@ const gracePeriodHandler = async (bot) => {
           reply_markup: renewalKeyboard(plans),
         }
       );
-      sub.graceNotifications.day2 = true;
-      await sub.save();
 
-    } else if (daysSinceExpiry === 1 && !sub.graceNotifications.day1) {
+    } else if (daysSinceExpiry === 1) {
       const plans = await getRenewalPlansByCategory(sub.planCategory || 'general');
       await safeSend(bot, sub.telegramId,
         `⚠️ *Grace Period Reminder*\n\nYour subscription has expired. You have ${GRACE_DAYS - 1} days left before removal.`,
@@ -304,8 +315,6 @@ const gracePeriodHandler = async (bot) => {
           reply_markup: renewalKeyboard(plans),
         }
       );
-      sub.graceNotifications.day1 = true;
-      await sub.save();
     }
   }
 };
@@ -547,7 +556,9 @@ const initCronJobs = (bot) => {
   for (const schedule of REMINDER_CRON_SCHEDULES) {
     cron.schedule(schedule, () => reminderScheduler(bot), cronOptions);
   }
-  cron.schedule('0 9 * * *', () => gracePeriodHandler(bot), cronOptions);    // 9:00 AM
+  for (const schedule of GRACE_REMINDER_CRON_SCHEDULES) {
+    cron.schedule(schedule, () => gracePeriodHandler(bot), cronOptions);
+  }
   cron.schedule('0 10 * * *', () => inactiveUserDetector(bot), cronOptions); // 10:00 AM
   cron.schedule('0 11 * * *', () => membershipMonitor(bot), cronOptions);    // 11:00 AM
   cron.schedule('59 23 * * *', () => dailySummaryJob(bot), cronOptions);     // 23:59
@@ -556,6 +567,7 @@ const initCronJobs = (bot) => {
   cron.schedule('0 */2 * * *', () => pendingRequestReminderJob(bot), cronOptions); // every 2 hours
 
   logger.info(`Reminder schedules initialized: ${REMINDER_CRON_SCHEDULES.join(' | ')}`);
+  logger.info(`Grace reminder schedules initialized: ${GRACE_REMINDER_CRON_SCHEDULES.join(' | ')}`);
   logger.info(`All cron jobs initialized. Timezone: ${CRON_TIMEZONE}`);
 };
 

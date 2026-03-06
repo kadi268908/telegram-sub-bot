@@ -413,14 +413,27 @@ const registerUserHandlers = (bot) => {
     [withStyle(Markup.button.callback('📱 More Menu', 'more_menu'), 'primary')],
   ]);
 
-  const checkPlansKeyboard = () => Markup.inlineKeyboard([
-    [withStyle(Markup.button.callback('🎬 Movie Plan', 'plan_menu_movie'), 'primary')],
-    [withStyle(Markup.button.callback('🔥 Desi Po*n Plan', 'plan_menu_desi'), 'primary')],
-    [withStyle(Markup.button.callback('🌍 Non-Desi Po*n Plan', 'plan_menu_non_desi'), 'primary')],
-    [withStyle(Markup.button.callback('🎬+🔥 Movie + Desi Combo', 'plan_menu_movie_desi'), 'success')],
-    [withStyle(Markup.button.callback('🎬+🌍 Movie + Non-Desi Combo', 'plan_menu_movie_non_desi'), 'success')],
-    [withStyle(Markup.button.callback('⬅️ Back Button', 'back_to_main'), 'success')],
-  ]);
+  const CHECK_PLANS_MENU_CONFIG = [
+    { category: PLAN_CATEGORY.MOVIE, text: '🎬 Movie Plan', callback: 'plan_menu_movie', style: 'primary' },
+    { category: PLAN_CATEGORY.DESI, text: '🔥 Desi Po*n Plan', callback: 'plan_menu_desi', style: 'primary' },
+    { category: PLAN_CATEGORY.NON_DESI, text: '🌍 Non-Desi Po*n Plan', callback: 'plan_menu_non_desi', style: 'primary' },
+    { category: PLAN_CATEGORY.MOVIE_DESI, text: '🎬+🔥 Movie + Desi Combo', callback: 'plan_menu_movie_desi', style: 'success' },
+    { category: PLAN_CATEGORY.MOVIE_NON_DESI, text: '🎬+🌍 Movie + Non-Desi Combo', callback: 'plan_menu_movie_non_desi', style: 'success' },
+  ];
+
+  const checkPlansKeyboard = async () => {
+    const activeCategoryValues = await Plan.distinct('category', { isActive: true });
+    const activeCategories = new Set(
+      activeCategoryValues.map((value) => normalizePlanCategory(value))
+    );
+
+    const rows = CHECK_PLANS_MENU_CONFIG
+      .filter((item) => activeCategories.has(item.category))
+      .map((item) => [withStyle(Markup.button.callback(item.text, item.callback), item.style)]);
+
+    rows.push([withStyle(Markup.button.callback('⬅️ Back Button', 'back_to_main'), 'success')]);
+    return Markup.inlineKeyboard(rows);
+  };
 
   const moreMenuKeyboard = () => Markup.inlineKeyboard([
     [withStyle(Markup.button.callback('📊 Check Subscription Status', 'check_status'), 'primary')],
@@ -700,7 +713,7 @@ const registerUserHandlers = (bot) => {
   bot.action('check_plans', async (ctx) => {
     await ctx.answerCbQuery();
 
-    const baseKeyboard = checkPlansKeyboard().reply_markup?.inline_keyboard || [];
+    const baseKeyboard = (await checkPlansKeyboard()).reply_markup?.inline_keyboard || [];
     const backRow = baseKeyboard.length ? [baseKeyboard[baseKeyboard.length - 1]] : [];
     const planRows = baseKeyboard.length ? baseKeyboard.slice(0, -1) : [];
     const keyboardWithSupport = Markup.inlineKeyboard([
@@ -709,10 +722,15 @@ const registerUserHandlers = (bot) => {
       ...backRow,
     ]);
 
+    const hasActivePlanRows = planRows.length > 0;
+
     await safeEditMessage(
       ctx,
-      `📋 *Check Plans*\n\nApni pasand ka plan choose karein.\n\n` +
-      `Plan se related koi issue ho to support se contact karein.`,
+      hasActivePlanRows
+        ? `📋 *Check Plans*\n\nApni pasand ka plan choose karein.\n\n` +
+        `Plan se related koi issue ho to support se contact karein.`
+        : `📋 *Check Plans*\n\nAbhi kisi bhi category me active plan available nahi hai.\n\n` +
+        `Please support se contact karein.`,
       {
         parse_mode: 'Markdown',
         ...keyboardWithSupport,
