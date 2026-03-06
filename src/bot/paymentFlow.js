@@ -26,6 +26,7 @@ const registerPaymentFlow = ({
     findOrCreateUser,
     getBestPublicOffer,
     getDiscountedPrice,
+    getNextOneTimeUserOffer,
     formatInr,
     consumeOneTimeUserOffer,
     submitPremiumRequest,
@@ -35,7 +36,7 @@ const registerPaymentFlow = ({
         await ctx.answerCbQuery();
         try {
             const category = normalizePlanCategory(ctx.match[1]);
-            const plansText = await buildCategoryPlansText(category);
+            const plansText = await buildCategoryPlansText(category, { telegramId: ctx.from.id });
             const activeCategorySub = await Subscription.findOne({
                 telegramId: ctx.from.id,
                 status: 'active',
@@ -217,16 +218,25 @@ const registerPaymentFlow = ({
             const callbackMessageId = ctx.callbackQuery?.message?.message_id;
             const callbackChatId = ctx.callbackQuery?.message?.chat?.id;
             const bestOffer = await getBestPublicOffer();
-            const discountedRenewalPrice = bestOffer?.discountPercent > 0
-                ? getDiscountedPrice(plan.price, bestOffer.discountPercent)
+            const privateOffer = await getNextOneTimeUserOffer(ctx.from.id);
+            const privateDiscountPercent = Number(privateOffer?.discountPercent || 0);
+            const publicDiscountPercent = Number(bestOffer?.discountPercent || 0);
+            const appliedDiscountPercent = privateDiscountPercent > 0
+                ? privateDiscountPercent
+                : publicDiscountPercent;
+            const discountedRenewalPrice = appliedDiscountPercent > 0
+                ? getDiscountedPrice(plan.price, appliedDiscountPercent)
                 : plan.price;
+            const appliedOfferTitle = privateDiscountPercent > 0
+                ? privateOffer.title
+                : bestOffer?.title;
 
             await ctx.reply(
                 `📸 *Renewal Payment Screenshot Upload Karein*\n\n` +
                 `Category: *${escapeMarkdown(getPlanCategoryLabel(renewalCategory))}*\n` +
                 `Plan: *${escapeMarkdown(plan.name)}* (${plan.durationDays} days${plan.price ? ` · ₹${formatInr(plan.price)}` : ''})\n` +
-                (plan.price && bestOffer?.discountPercent > 0
-                    ? `🎁 Offer: *${escapeMarkdown(bestOffer.title)}* (${bestOffer.discountPercent}% OFF)\n` +
+                (plan.price && appliedDiscountPercent > 0
+                    ? `🎁 Offer: *${escapeMarkdown(appliedOfferTitle || 'Applied Offer')}* (${appliedDiscountPercent}% OFF)\n` +
                     `💰 Payable: *₹${formatInr(discountedRenewalPrice)}*\n\n`
                     : '\n') +
                 `Ab payment screenshot photo/document bhejiye.`,
@@ -432,6 +442,17 @@ const registerPaymentFlow = ({
 
             const consumedOffer = await consumeOneTimeUserOffer(ctx.from.id, renewalReq._id);
             const bestOffer = await getBestPublicOffer();
+            const privateDiscountPercent = Number(consumedOffer?.discountPercent || 0);
+            const publicDiscountPercent = Number(bestOffer?.discountPercent || 0);
+            const appliedDiscountPercent = privateDiscountPercent > 0
+                ? privateDiscountPercent
+                : publicDiscountPercent;
+            const appliedOfferTitle = privateDiscountPercent > 0
+                ? consumedOffer?.title
+                : bestOffer?.title;
+            const discountedPlanPrice = appliedDiscountPercent > 0
+                ? getDiscountedPrice(plan.price, appliedDiscountPercent)
+                : plan.price;
             if (consumedOffer) {
                 await Request.findByIdAndUpdate(renewalReq._id, {
                     appliedUserOffer: {
@@ -459,13 +480,10 @@ const registerPaymentFlow = ({
             await ctx.reply(
                 `✅ *${escapeMarkdown(categoryLabel)} renewal request submitted!*\n\n` +
                 `📋 Plan: *${escapeMarkdown(plan.name)}* (${plan.durationDays} days${plan.price ? ` · ₹${formatInr(plan.price)}` : ''})\n` +
-                (plan.price && bestOffer?.discountPercent > 0
-                    ? `🎁 *Public offer applied:* ${escapeMarkdown(bestOffer.title)} (${bestOffer.discountPercent}% OFF)\n` +
-                    `💰 Price: ~₹${formatInr(plan.price)}~ → *₹${formatInr(getDiscountedPrice(plan.price, bestOffer.discountPercent))}*\n\n`
+                (plan.price && appliedDiscountPercent > 0
+                    ? `🎁 *Offer applied:* ${escapeMarkdown(appliedOfferTitle || 'Applied Offer')} (${appliedDiscountPercent}% OFF)\n` +
+                    `💰 Price: ~₹${formatInr(plan.price)}~ → *₹${formatInr(discountedPlanPrice)}*\n\n`
                     : '\n') +
-                (consumedOffer
-                    ? `🎁 *Private offer applied:* ${escapeMarkdown(consumedOffer.title)}${consumedOffer.discountPercent > 0 ? ` (*${consumedOffer.discountPercent}% OFF*)` : ''}\n\n`
-                    : '') +
                 `Admin screenshot verify karke approval denge. Approval ke baad isi category plan me days add honge.`,
                 { parse_mode: 'Markdown' }
             );
@@ -478,12 +496,9 @@ const registerPaymentFlow = ({
                 `👤 Name: ${safeName}\n` +
                 `🆔 ID: \`${ctx.from.id}\`\n` +
                 `📛 Username: ${safeUsername}\n` +
-                (plan.price && bestOffer?.discountPercent > 0
-                    ? `🎁 Public Offer: *${escapeMarkdown(bestOffer.title)}* (${bestOffer.discountPercent}% OFF)\n` +
-                    `💰 Price: ~₹${formatInr(plan.price)}~ → *₹${formatInr(getDiscountedPrice(plan.price, bestOffer.discountPercent))}*\n`
-                    : '') +
-                (consumedOffer
-                    ? `🎁 Private Offer: *${escapeMarkdown(consumedOffer.title)}*${consumedOffer.discountPercent > 0 ? ` (*${consumedOffer.discountPercent}% OFF*)` : ''}\n`
+                (plan.price && appliedDiscountPercent > 0
+                    ? `🎁 Offer: *${escapeMarkdown(appliedOfferTitle || 'Applied Offer')}* (${appliedDiscountPercent}% OFF)\n` +
+                    `💰 Price: ~₹${formatInr(plan.price)}~ → *₹${formatInr(discountedPlanPrice)}*\n`
                     : '') +
                 `📋 Plan: ${safePlanName} (${plan.durationDays} days${plan.price ? ` · ₹${formatInr(plan.price)}` : ''})\n` +
                 `🧾 Payment Proof Log Msg: \`${proofLogMessageId || 'N/A'}\`\n` +

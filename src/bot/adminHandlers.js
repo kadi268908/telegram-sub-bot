@@ -127,6 +127,13 @@ const formatSubscriptionCategoryList = (subscriptions) => {
     .join('\n');
 };
 
+const getDiscountedPrice = (price, discountPercent) => {
+  const base = Number(price || 0);
+  const discount = Number(discountPercent || 0);
+  if (!base || discount <= 0) return base;
+  return Math.ceil(Math.max(0, base - (base * discount / 100)));
+};
+
 const normalizeFilterPhrase = (value) => String(value || '').trim().toLowerCase();
 
 const parseFilterPhrase = (text = '', command = 'filter') => {
@@ -437,6 +444,11 @@ const registerAdminHandlers = (bot) => {
       await approveRequest(requestId, ctx.from.id, plan._id);
 
       const allRenewal = subscriptions.every((item) => item.subscription?.isRenewal);
+      const appliedOffer = request?.appliedUserOffer || {};
+      const appliedDiscountPercent = Number(appliedOffer.discountPercent || 0);
+      const payableAmount = appliedDiscountPercent > 0
+        ? getDiscountedPrice(plan.price, appliedDiscountPercent)
+        : Number(plan.price || 0);
       const maxExpiry = subscriptions
         .map((item) => item.subscription?.expiryDate)
         .filter(Boolean)
@@ -473,6 +485,9 @@ const registerAdminHandlers = (bot) => {
         userMessage =
           `🎉 *Subscription Renewed!*\n\n` +
           `📋 Plan: *${plan.name}*\n` +
+          (Number(plan.price || 0) > 0 && appliedDiscountPercent > 0
+            ? `💰 Price: ~₹${Number(plan.price || 0).toFixed(2)}~ → *₹${payableAmount.toFixed(2)}*\n`
+            : '') +
           `➕ Extended by: *${plan.durationDays} days*\n` +
           `📅 New Expiry: *${formatDate(maxExpiry)}*\n\n` +
           `Apka premium renew ho gaya hai. \n\n` +
@@ -481,6 +496,9 @@ const registerAdminHandlers = (bot) => {
         userMessage =
           `🎉 *Access Approved!*\n\n` +
           `📋 Plan: *${plan.name}*\n` +
+          (Number(plan.price || 0) > 0 && appliedDiscountPercent > 0
+            ? `💰 Price: ~₹${Number(plan.price || 0).toFixed(2)}~ → *₹${payableAmount.toFixed(2)}*\n`
+            : '') +
           `📅 Valid for: *${plan.durationDays} days*\n` +
           `⏰ Expires on: *${formatDate(maxExpiry)}*\n\n` +
           (inviteButtons.length
@@ -499,7 +517,7 @@ const registerAdminHandlers = (bot) => {
 
       await safeSend(bot, request.telegramId, userMessage, extra);
       await awardReferralBonus(bot, request.telegramId);
-      await awardSellerCommission(bot, request.telegramId, plan.price || 0);
+      await awardSellerCommission(bot, request.telegramId, payableAmount);
 
       // Edit log channel message
       try {
@@ -518,6 +536,9 @@ const registerAdminHandlers = (bot) => {
         `Category: ${resolvedPlanCategory}\n` +
         `Group(s): ${subscriptions.map((item) => `\`${item.groupId}\``).join(', ')}\n` +
         `Plan: ${plan.name} (${plan.durationDays}d)\n` +
+        (Number(plan.price || 0) > 0 && appliedDiscountPercent > 0
+          ? `Price: ₹${Number(plan.price || 0).toFixed(2)} -> ₹${payableAmount.toFixed(2)} (${appliedDiscountPercent}% OFF${appliedOffer?.title ? `, ${appliedOffer.title}` : ''})\n`
+          : '') +
         `Expires: ${formatDate(maxExpiry)}\n` +
         `By: ${ctx.from.username ? '@' + ctx.from.username : ctx.from.id}`
       );
@@ -533,6 +554,10 @@ const registerAdminHandlers = (bot) => {
           premiumGroupIds: subscriptions.map((item) => item.groupId),
           atomicCategories: subscriptions.map((item) => item.category),
           isRenewal: allRenewal,
+          planPrice: Number(plan.price || 0),
+          payableAmount,
+          appliedDiscountPercent,
+          appliedOfferTitle: appliedOffer?.title || null,
         },
       });
 

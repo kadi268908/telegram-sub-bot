@@ -137,6 +137,17 @@ const getDiscountedPrice = (price, discountPercent) => {
   return Math.ceil(Math.max(0, base - (base * discount / 100)));
 };
 
+const getNextOneTimeUserOffer = async (telegramId) => {
+  if (!telegramId) return null;
+
+  return UserOffer.findOne({
+    targetTelegramId: telegramId,
+    isActive: true,
+    isUsed: false,
+    validTill: { $gt: new Date() },
+  }).sort({ createdAt: 1 });
+};
+
 const strikeText = (value) => {
   return String(value || '').split('').map((ch) => `${ch}\u0336`).join('');
 };
@@ -482,10 +493,11 @@ const registerUserHandlers = (bot) => {
     }).sort({ durationDays: 1 });
   };
 
-  const buildCategoryPlansText = async (category) => {
+  const buildCategoryPlansText = async (category, options = {}) => {
     const plans = await getCategoryPlans(category);
     const title = PLAN_CATEGORY_BUTTON_LABELS[normalizePlanCategory(category)] || getPlanCategoryLabel(category);
     const bestOffer = await getBestPublicOffer();
+    const privateOffer = await getNextOneTimeUserOffer(options.telegramId);
 
     if (!plans.length) {
       return `📋 ${title}\n\nNo active plans found for this category right now.\nPlease contact support from More Menu.`;
@@ -495,9 +507,15 @@ const registerUserHandlers = (bot) => {
     plans.forEach((plan, index) => {
       text += `${index + 1}. ${plan.name} — ${plan.durationDays} days`;
       if (plan.price) {
-        if (bestOffer?.discountPercent > 0) {
-          const discounted = getDiscountedPrice(plan.price, bestOffer.discountPercent);
-          text += ` — ${strikeText(`₹${formatInr(plan.price)}`)} ₹${formatInr(discounted)} (${bestOffer.discountPercent}% OFF)`;
+        const privateDiscountPercent = Number(privateOffer?.discountPercent || 0);
+        const publicDiscountPercent = Number(bestOffer?.discountPercent || 0);
+        const appliedDiscountPercent = privateDiscountPercent > 0
+          ? privateDiscountPercent
+          : publicDiscountPercent;
+
+        if (appliedDiscountPercent > 0) {
+          const discounted = getDiscountedPrice(plan.price, appliedDiscountPercent);
+          text += ` — ${strikeText(`₹${formatInr(plan.price)}`)} ₹${formatInr(discounted)} (${appliedDiscountPercent}% OFF)`;
         } else {
           text += ` — ₹${formatInr(plan.price)}`;
         }
@@ -505,7 +523,9 @@ const registerUserHandlers = (bot) => {
       text += `\n`;
     });
 
-    if (bestOffer?.discountPercent > 0) {
+    if (Number(privateOffer?.discountPercent || 0) > 0) {
+      text += `\n🎁 Offer Applied: ${privateOffer.discountPercent}% OFF (${privateOffer.title})\n`;
+    } else if (bestOffer?.discountPercent > 0) {
       text += `\n🎁 Offer Applied: ${bestOffer.discountPercent}% OFF (${bestOffer.title})\n`;
     }
 
@@ -790,6 +810,7 @@ const registerUserHandlers = (bot) => {
     findOrCreateUser,
     getBestPublicOffer,
     getDiscountedPrice,
+    getNextOneTimeUserOffer,
     formatInr,
     consumeOneTimeUserOffer,
     submitPremiumRequest,
@@ -999,6 +1020,7 @@ const registerUserHandlers = (bot) => {
 
       const plans = await Plan.find({ isActive: true, category }).sort({ durationDays: 1 });
       const bestOffer = await getBestPublicOffer();
+      const privateOffer = await getNextOneTimeUserOffer(ctx.from.id);
       const categoryLabel = getPlanCategoryLabel(category);
 
       if (!plans.length) {
@@ -1021,8 +1043,14 @@ const registerUserHandlers = (bot) => {
           ...plans.map((plan) => ([withStyle({
             text: (() => {
               if (!plan.price) return `🔄 Renew ${plan.durationDays} Days`;
-              if (bestOffer?.discountPercent > 0) {
-                const discounted = getDiscountedPrice(plan.price, bestOffer.discountPercent);
+              const privateDiscountPercent = Number(privateOffer?.discountPercent || 0);
+              const publicDiscountPercent = Number(bestOffer?.discountPercent || 0);
+              const appliedDiscountPercent = privateDiscountPercent > 0
+                ? privateDiscountPercent
+                : publicDiscountPercent;
+
+              if (appliedDiscountPercent > 0) {
+                const discounted = getDiscountedPrice(plan.price, appliedDiscountPercent);
                 return `🔄 Renew ${plan.durationDays} Days · ₹${formatInr(discounted)}`;
               }
               return `🔄 Renew ${plan.durationDays} Days · ₹${formatInr(plan.price)}`;
