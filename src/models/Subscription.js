@@ -1,5 +1,5 @@
 // src/models/Subscription.js
-// Tracks all user subscriptions with dates, status, reminder flags, and grace period
+// Tracks all user subscriptions with dates, status, and reminder flags
 
 const mongoose = require('mongoose');
 
@@ -50,7 +50,7 @@ const subscriptionSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['active', 'expired', 'cancelled', 'grace'],
+    enum: ['active', 'expired', 'cancelled'],
     default: 'active',
     index: true,
   },
@@ -75,15 +75,6 @@ const subscriptionSchema = new mongoose.Schema({
     day3: { type: Boolean, default: false },
     day1: { type: Boolean, default: false },
     day0: { type: Boolean, default: false },
-  },
-  graceDaysUsed: {
-    type: Number,
-    default: 0,
-  },
-  graceNotifications: {
-    day1: { type: Boolean, default: false },
-    day2: { type: Boolean, default: false },
-    day3: { type: Boolean, default: false },
   },
   isRenewal: {
     type: Boolean,

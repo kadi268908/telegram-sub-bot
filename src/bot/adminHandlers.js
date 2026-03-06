@@ -79,15 +79,15 @@ const parseCategoryInput = (value) => {
   return normalized;
 };
 
-const getActiveOrGraceSubscriptions = async (telegramId) => {
+const getActiveSubscriptions = async (telegramId) => {
   return Subscription.find({
     telegramId,
-    status: { $in: ['active', 'grace'] },
+    status: 'active',
   }).sort({ expiryDate: -1, createdAt: -1 });
 };
 
 const resolveSubscriptionForAdminAction = async (telegramId, categoryInput = null) => {
-  const subscriptions = await getActiveOrGraceSubscriptions(telegramId);
+  const subscriptions = await getActiveSubscriptions(telegramId);
   if (!subscriptions.length) {
     return { error: 'none' };
   }
@@ -597,7 +597,7 @@ const registerAdminHandlers = (bot) => {
 
     const activeSubs = await Subscription.find({
       telegramId: targetId,
-      status: { $in: ['active', 'grace'] },
+      status: 'active',
       expiryDate: { $gt: new Date() },
     }).sort({ expiryDate: 1 });
     const totalSubs = await Subscription.countDocuments({ telegramId: targetId });
@@ -613,7 +613,7 @@ const registerAdminHandlers = (bot) => {
     msg += `Total Subscriptions: *${totalSubs}*\n`;
 
     if (activeSubs.length) {
-      msg += `\n📋 *Active/Grace Subscriptions:*\n`;
+      msg += `\n📋 *Active Subscriptions:*\n`;
       activeSubs.forEach((sub, index) => {
         const category = normalizePlanCategory(sub.planCategory || sub.planId?.category || 'general');
         msg += `${index + 1}. *${category}* — ${sub.planName}\n`;
@@ -716,7 +716,7 @@ const registerAdminHandlers = (bot) => {
 
           const existingSub = await Subscription.findOne({
             telegramId,
-            status: { $in: ['active', 'grace'] },
+            status: 'active',
           }).sort({ createdAt: -1 });
 
           if (existingSub) {
@@ -730,8 +730,6 @@ const registerAdminHandlers = (bot) => {
             existingSub.status = 'active';
             existingSub.approvedBy = ctx.from.id;
             existingSub.isRenewal = false;
-            existingSub.graceDaysUsed = 0;
-            existingSub.graceNotifications = { day1: false, day2: false, day3: false };
             existingSub.reminderFlags = { day7: false, day3: false, day1: false, day0: false };
             await existingSub.save();
             updated++;
@@ -755,7 +753,7 @@ const registerAdminHandlers = (bot) => {
 
           await User.findOneAndUpdate(
             { telegramId },
-            { status: 'active', isBlocked: false, graceDaysRemaining: null, lastInteraction: new Date() }
+            { status: 'active', isBlocked: false, lastInteraction: new Date() }
           );
         } catch (e) {
           skippedInvalid++;
@@ -817,20 +815,20 @@ const registerAdminHandlers = (bot) => {
 
       const resolved = await resolveSubscriptionForAdminAction(targetId, categoryInput);
       if (resolved.error === 'none') {
-        return ctx.reply('ℹ️ No active/grace subscription found for this user.');
+        return ctx.reply('ℹ️ No active subscription found for this user.');
       }
       if (resolved.error === 'invalid_category') {
         return ctx.reply('❌ Invalid category. Use movie, desi, non_desi, or general.');
       }
       if (resolved.error === 'category_not_found') {
         return ctx.reply(
-          `❌ No active/grace subscription found in category *${resolved.normalizedCategory}*.`,
+          `❌ No active subscription found in category *${resolved.normalizedCategory}*.`,
           { parse_mode: 'Markdown' }
         );
       }
       if (resolved.error === 'ambiguous') {
         return ctx.reply(
-          `⚠️ Multiple active/grace subscriptions found. Please pass category.\n\n` +
+          `⚠️ Multiple active subscriptions found. Please pass category.\n\n` +
           `Usage: /revokeplan <telegramId> [category]\n\n` +
           `${formatSubscriptionCategoryList(resolved.subscriptions)}`
         );
@@ -842,20 +840,17 @@ const registerAdminHandlers = (bot) => {
       const revokedAt = new Date();
       activeSub.status = 'cancelled';
       activeSub.expiryDate = revokedAt;
-      activeSub.graceDaysUsed = 0;
-      activeSub.graceNotifications = { day1: false, day2: false, day3: false };
       await activeSub.save();
 
       const remainingActiveSubs = await Subscription.countDocuments({
         telegramId: targetId,
-        status: { $in: ['active', 'grace'] },
+        status: 'active',
       });
 
       await User.findOneAndUpdate(
         { telegramId: targetId },
         {
           status: remainingActiveSubs > 0 ? 'active' : 'inactive',
-          graceDaysRemaining: null,
           lastInteraction: new Date(),
         }
       );
@@ -931,20 +926,20 @@ const registerAdminHandlers = (bot) => {
 
       const resolved = await resolveSubscriptionForAdminAction(targetId, categoryPart || null);
       if (resolved.error === 'none') {
-        return ctx.reply('ℹ️ No active/grace subscription found for this user to modify.');
+        return ctx.reply('ℹ️ No active subscription found for this user to modify.');
       }
       if (resolved.error === 'invalid_category') {
         return ctx.reply('❌ Invalid category. Use movie, desi, non_desi, or general.');
       }
       if (resolved.error === 'category_not_found') {
         return ctx.reply(
-          `❌ No active/grace subscription found in category *${resolved.normalizedCategory}* for modify.`,
+          `❌ No active subscription found in category *${resolved.normalizedCategory}* for modify.`,
           { parse_mode: 'Markdown' }
         );
       }
       if (resolved.error === 'ambiguous') {
         return ctx.reply(
-          `⚠️ Multiple active/grace subscriptions found. Please pass category in 3rd argument.\n\n` +
+          `⚠️ Multiple active subscriptions found. Please pass category in 3rd argument.\n\n` +
           `Usage: /modifyplan <telegramId>|<planIdOrDays>|[category]\n\n` +
           `${formatSubscriptionCategoryList(resolved.subscriptions)}`
         );
@@ -972,14 +967,12 @@ const registerAdminHandlers = (bot) => {
       activeSub.status = 'active';
       activeSub.approvedBy = ctx.from.id;
       activeSub.isRenewal = false;
-      activeSub.graceDaysUsed = 0;
-      activeSub.graceNotifications = { day1: false, day2: false, day3: false };
       activeSub.reminderFlags = { day7: false, day3: false, day1: false, day0: false };
       await activeSub.save();
 
       await User.findOneAndUpdate(
         { telegramId: targetId },
-        { status: 'active', graceDaysRemaining: null, lastInteraction: new Date() }
+        { status: 'active', lastInteraction: new Date() }
       );
 
       if (oldGroupId && String(oldGroupId) !== String(newGroupId)) {
@@ -1069,13 +1062,13 @@ const registerAdminHandlers = (bot) => {
       }
       if (resolved.error === 'category_not_found') {
         return ctx.reply(
-          `❌ No active/grace subscription found in category *${resolved.normalizedCategory}* for invite.`,
+          `❌ No active subscription found in category *${resolved.normalizedCategory}* for invite.`,
           { parse_mode: 'Markdown' }
         );
       }
       if (resolved.error === 'ambiguous') {
         return ctx.reply(
-          `⚠️ Multiple active/grace subscriptions found. Please pass category.\n\n` +
+          `⚠️ Multiple active subscriptions found. Please pass category.\n\n` +
           `Usage: /invite <telegramId> [category]\n\n` +
           `${formatSubscriptionCategoryList(resolved.subscriptions)}`
         );
@@ -1085,7 +1078,7 @@ const registerAdminHandlers = (bot) => {
       if (!activeSub || activeSub.expiryDate <= new Date()) {
         await User.findOneAndUpdate(
           { telegramId: targetId },
-          { status: 'inactive', graceDaysRemaining: null, lastInteraction: new Date() }
+          { status: 'inactive', lastInteraction: new Date() }
         );
 
         await safeSend(

@@ -1,6 +1,6 @@
 # Telegram Subscription Management Bot v2.0
 
-Production-ready Telegram bot with advanced subscription management, referrals, support tickets, grace periods, and analytics.
+Production-ready Telegram bot with advanced subscription management, referrals, support tickets, and analytics.
 
 ---
 
@@ -10,7 +10,7 @@ Production-ready Telegram bot with advanced subscription management, referrals, 
 |---|---|
 | Smart Reminders | Alerts at 7, 3, 1 day before expiry + expiry day |
 | One-Click Renewal | Inline renewal buttons in every reminder |
-| Grace Period | 3-day window after expiry with daily warnings before ban |
+| Expiry Enforcement | Expired users are removed from premium group on scheduled checks |
 | Referral System | Unique codes, discount reward for referrer on first sub |
 | Anti-Link Protection | Invite links: 1 use, 10-minute expiry |
 | Membership Monitor | Daily check: resend invites / remove expired users |
@@ -64,7 +64,6 @@ npm start
 | `SUPPORT_CONTACT` | ❌ | Support bot/handle shown in user messages |
 | `INVITE_LINK_TTL_MINUTES` | ❌ | Default: 10 |
 | `REFERRAL_REWARD_DISCOUNT_PERCENT` | ❌ | Default: 10 |
-| `GRACE_PERIOD_DAYS` | ❌ | Default: 3 |
 | `REJOINING_PENALTY` | ❌ | Default: 20 |
 | `SELLER_COMMISSION_PERCENT` | ❌ | Default: 15 |
 | `SELLER_MIN_WITHDRAW_REFERRALS` | ❌ | Default: 10 |
@@ -93,7 +92,7 @@ src/
 ├── models/
 │   ├── User.js            # + referralCode, referredBy, lastInteraction, isBlocked
 │   ├── Plan.js
-│   ├── Subscription.js    # + reminderFlags, graceDaysUsed, isRenewal
+│   ├── Subscription.js    # + reminderFlags, isRenewal
 │   ├── Offer.js
 │   ├── Request.js
 │   ├── AdminLog.js        # NEW - admin audit trail
@@ -125,7 +124,7 @@ src/
 | Job | Time | Purpose |
 |---|---|---|
 | reminderScheduler | 8:00 AM | Send 7/3/1/0-day expiry reminders |
-| gracePeriodHandler | 9:00 AM | Process grace period & removals |
+| expiryEnforcementHandler | 9:00 AM | Expire overdue users + remove group access |
 | inactiveUserDetector | 10:00 AM | Re-engage inactive users |
 | membershipMonitor | 11:00 AM | Sync group membership vs subscriptions |
 | dailySummary | 11:59 PM | Post activity summary to log channel |
@@ -173,16 +172,13 @@ src/
 
 ---
 
-## Grace Period Flow
+## Expiry Flow
 
 ```
-Day 0 (expiry)   → Expired message + renewal buttons
-Day +1           → Reminder: X days left before removal
-Day +2           → Final warning
-Day +3 (default) → Banned from group + renewal message
+Subscription passes expiry date → Marked expired on next enforcement run
+Marked expired → Removed from premium group
+User gets expiry notification + renewal options
 ```
-
-Configure with `GRACE_PERIOD_DAYS=3` in `.env`.
 
 ---
 

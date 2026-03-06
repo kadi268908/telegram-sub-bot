@@ -10,7 +10,7 @@ const { normalizePlanCategory, getGroupIdForCategory } = require('../utils/premi
 
 /**
  * Create or RENEW a subscription.
- * Renewal: extends existing active/grace sub by plan.durationDays from current expiry.
+ * Renewal: extends existing active subscription by plan.durationDays from current expiry.
  * New: starts fresh from today.
  * Returns { subscription, isRenewal }
  */
@@ -22,10 +22,10 @@ const createSubscription = async (telegramId, plan, adminId, options = {}) => {
     const planCategory = normalizePlanCategory(options.planCategory || plan.category);
     const premiumGroupId = String(options.premiumGroupId || getGroupIdForCategory(planCategory) || '');
 
-    // Check for an existing active or grace-period subscription of SAME category to extend
+    // Check for an existing active subscription of same category to extend
     const existingSub = await Subscription.findOne({
       telegramId,
-      status: { $in: ['active', 'grace'] },
+      status: 'active',
       planCategory,
     });
 
@@ -45,12 +45,10 @@ const createSubscription = async (telegramId, plan, adminId, options = {}) => {
       existingSub.status = 'active';
       existingSub.approvedBy = adminId;
       existingSub.isRenewal = true;
-      existingSub.graceDaysUsed = 0;
-      existingSub.graceNotifications = { day1: false, day2: false, day3: false };
       existingSub.reminderFlags = { day7: false, day3: false, day1: false, day0: false };
       await existingSub.save();
 
-      await User.findByIdAndUpdate(user._id, { status: 'active', graceDaysRemaining: null });
+      await User.findByIdAndUpdate(user._id, { status: 'active' });
       logger.info(`Subscription RENEWED for ${telegramId}: +${plan.durationDays} days → expiry ${newExpiry}`);
       return existingSub;
     }
@@ -74,7 +72,7 @@ const createSubscription = async (telegramId, plan, adminId, options = {}) => {
       isRenewal: false,
     });
 
-    await User.findByIdAndUpdate(user._id, { status: 'active', graceDaysRemaining: null });
+    await User.findByIdAndUpdate(user._id, { status: 'active' });
     logger.info(`Subscription CREATED for ${telegramId}: ${plan.name} until ${expiryDate}`);
     return subscription;
   } catch (error) {

@@ -172,14 +172,14 @@ const registerPaymentFlow = ({
                 return ctx.reply('❌ Selected plan category mismatch. Please retry renewal from status.');
             }
 
-            const activeOrGraceSub = await Subscription.findOne({
+            const activeSub = await Subscription.findOne({
                 telegramId: ctx.from.id,
-                status: { $in: ['active', 'grace'] },
+                status: 'active',
                 planCategory: renewalCategory,
             });
-            if (!activeOrGraceSub) {
+            if (!activeSub) {
                 return ctx.reply(
-                    `⚠️ Aapke paas *${escapeMarkdown(getPlanCategoryLabel(renewalCategory))}* ka active/grace subscription nahi hai.\n\n` +
+                    `⚠️ Aapke paas *${escapeMarkdown(getPlanCategoryLabel(renewalCategory))}* ka active subscription nahi hai.\n\n` +
                     `Renew karne ke liye pehle us category ka active plan hona chahiye.`,
                     { parse_mode: 'Markdown' }
                 );

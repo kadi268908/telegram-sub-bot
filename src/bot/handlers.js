@@ -950,24 +950,6 @@ const registerUserHandlers = (bot) => {
         );
       }
 
-      const graceSub = await Subscription.findOne({ telegramId: ctx.from.id, status: 'grace' });
-      if (graceSub) {
-        const daysOverdue = Math.floor((new Date() - graceSub.expiryDate) / (1000 * 60 * 60 * 24));
-        const graceDays = parseInt(process.env.GRACE_PERIOD_DAYS) || 3;
-        const left = Math.max(0, graceDays - daysOverdue);
-        const plans = await Plan.find({ isActive: true, category: normalizePlanCategory(graceSub.planCategory || 'general') }).sort({ durationDays: 1 });
-        return ctx.reply(
-          `⚠️ *Subscription Expired — Grace Period*\n\n` +
-          `Your subscription expired ${daysOverdue} day(s) ago.\n` +
-          `⏳ *${left} grace day(s)* k baad aap group se remove ho jayenge.\n\n` +
-          `Apne premium ko renew karne ke liye niche diye gaye plans se select karein:`,
-          {
-            parse_mode: 'Markdown',
-            reply_markup: plans.length ? renewalKeyboard(plans) : undefined,
-          }
-        );
-      }
-
       await ctx.reply(
         `❌ *No Active Subscription*\n\n` +
         `Aapka koi subscription active nahi hai.\n` +

@@ -170,7 +170,7 @@ const main = async () => {
 
                 const activeSub = await Subscription.findOne({
                     telegramId,
-                    status: { $in: ['active', 'grace'] },
+                    status: 'active',
                 }).sort({ createdAt: -1 });
 
                 if (activeSub) {
@@ -181,8 +181,6 @@ const main = async () => {
                     activeSub.expiryDate = expiryDate;
                     activeSub.status = 'active';
                     activeSub.isRenewal = false;
-                    activeSub.graceDaysUsed = 0;
-                    activeSub.graceNotifications = { day1: false, day2: false, day3: false };
                     activeSub.reminderFlags = { day7: false, day3: false, day1: false, day0: false };
                     await activeSub.save();
                     updated += 1;
@@ -204,7 +202,7 @@ const main = async () => {
 
                 await User.findOneAndUpdate(
                     { telegramId },
-                    { status: 'active', isBlocked: false, graceDaysRemaining: null, lastInteraction: new Date() }
+                    { status: 'active', isBlocked: false, lastInteraction: new Date() }
                 );
             } catch (err) {
                 failed += 1;

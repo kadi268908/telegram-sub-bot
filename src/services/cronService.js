@@ -1,7 +1,7 @@
 // src/services/cronService.js
 // All scheduled cron jobs:
 //   reminderScheduler    - expiry reminders at 7/3/1/0 days
-//   gracePeriodHandler   - 3-day grace before group removal
+//   expiryEnforcementHandler - remove expired users from groups
 //   inactiveUserDetector - re-engage users inactive 30+ days
 //   membershipMonitor    - resend invite / ban mismatched users
 //   dailySummary         - nightly channel report at 23:59
@@ -29,7 +29,7 @@ const REMINDER_CRON_SCHEDULES = (process.env.REMINDER_CRON_SCHEDULES || '15 9 * 
   .split(',')
   .map((schedule) => schedule.trim())
   .filter(Boolean);
-const GRACE_REMINDER_CRON_SCHEDULES = (process.env.GRACE_REMINDER_CRON_SCHEDULES || '0 8 * * *,0 14 * * *,30 20 * * *')
+const EXPIRY_ENFORCEMENT_CRON_SCHEDULES = (process.env.EXPIRY_ENFORCEMENT_CRON_SCHEDULES || '0 8 * * *,0 14 * * *,30 20 * * *')
   .split(',')
   .map((schedule) => schedule.trim())
   .filter(Boolean);
@@ -77,7 +77,6 @@ const buildDailyBackupPayload = async (summary) => {
     activeUsers,
     blockedUsers,
     activeSubscriptions,
-    graceSubscriptions,
     pendingRequests,
     activePlans,
   ] = await Promise.all([
@@ -86,10 +85,6 @@ const buildDailyBackupPayload = async (summary) => {
     User.countDocuments({ role: 'user', isBlocked: true }),
     Subscription.find({ status: 'active', expiryDate: { $gt: now } })
       .select('telegramId planName planCategory premiumGroupId startDate expiryDate status approvedBy')
-      .sort({ expiryDate: 1 })
-      .lean(),
-    Subscription.find({ status: 'grace' })
-      .select('telegramId planName planCategory premiumGroupId expiryDate graceDaysUsed status')
       .sort({ expiryDate: 1 })
       .lean(),
     Request.find({ status: 'pending' })
@@ -111,12 +106,10 @@ const buildDailyBackupPayload = async (summary) => {
       activeUsers,
       blockedUsers,
       activeSubscriptions: activeSubscriptions.length,
-      graceSubscriptions: graceSubscriptions.length,
       pendingRequests: pendingRequests.length,
       activePlans: activePlans.length,
     },
     activeSubscriptions,
-    graceSubscriptions,
     pendingRequests,
     activePlans,
   };
@@ -216,29 +209,28 @@ const reminderScheduler = async (bot) => {
   }
 };
 
-// ── 2. GRACE PERIOD HANDLER ──────────────────────────────────────────────────
-// Runs daily at 9:00 AM
-// Day 0: expiry message
-// Day +1: reminder
-// Day +2: final warning
-// Day +3: remove from group
-const gracePeriodHandler = async (bot) => {
-  logger.info('[CRON] Running gracePeriodHandler...');
-  const GRACE_DAYS = parseInt(process.env.GRACE_PERIOD_DAYS) || 3;
+// ── 2. EXPIRY ENFORCEMENT HANDLER ───────────────────────────────────────────
+// Runs multiple times daily
+// Immediately expires overdue active subscriptions and removes group access.
+const expiryEnforcementHandler = async (bot) => {
+  logger.info('[CRON] Running expiryEnforcementHandler...');
   const today = startOfToday();
 
-  // Find subscriptions that just expired (expiryDate was yesterday or today, status still active)
+  // Find active subscriptions whose expiry has passed.
   const justExpired = await Subscription.find({
     status: 'active',
     expiryDate: { $lt: today },
   });
 
   for (const sub of justExpired) {
-    // Transition to grace status
-    sub.status = 'grace';
-    sub.graceDaysUsed = 0;
+    sub.status = 'expired';
     await sub.save();
-    await User.findOneAndUpdate({ telegramId: sub.telegramId }, { status: 'expired', graceDaysRemaining: GRACE_DAYS });
+    await User.findOneAndUpdate({ telegramId: sub.telegramId }, { status: 'expired' });
+
+    const groupId = getSubscriptionGroupId(sub);
+    if (groupId) {
+      await banFromGroup(bot, groupId, sub.telegramId);
+    }
 
     let renewalPlans = [];
     if (sub.planId) {
@@ -251,71 +243,21 @@ const gracePeriodHandler = async (bot) => {
 
     await safeSend(bot, sub.telegramId,
       `❌ *Subscription Expired*\n\nYour subscription expired on *${formatDate(sub.expiryDate)}*.\n\n` +
-      `⏳ You have a ${GRACE_DAYS}-day grace period. Renew now to keep your access!`,
+      `🚫 Premium group access has been removed. Renew now to continue access.`,
       {
         parse_mode: 'Markdown',
         ...(renewalPlans.length ? { reply_markup: renewalKeyboard(renewalPlans) } : {}),
       }
     );
 
-    await logToChannel(bot, `⚠️ *Grace Period Started*\nUser: \`${sub.telegramId}\`\nPlan: ${sub.planName}`);
-  }
+    await logToChannel(bot, `🚫 *Expired User Access Removed*\nUser: \`${sub.telegramId}\`\nPlan: ${sub.planName}`);
 
-  // Process existing grace period subscriptions
-  const inGrace = await Subscription.find({ status: 'grace' });
-
-  for (const sub of inGrace) {
-    const daysSinceExpiry = Math.floor((today - sub.expiryDate) / (1000 * 60 * 60 * 24));
-
-    if (daysSinceExpiry >= GRACE_DAYS) {
-      // Remove from group
-      const groupId = getSubscriptionGroupId(sub);
-      if (groupId) {
-        await banFromGroup(bot, groupId, sub.telegramId);
-      }
-
-      // Mark subscription fully expired
-      sub.status = 'expired';
-      sub.graceDaysUsed = GRACE_DAYS;
-      await sub.save();
-      await User.findOneAndUpdate({ telegramId: sub.telegramId }, { status: 'expired', graceDaysRemaining: 0 });
-
-      await safeSend(bot, sub.telegramId,
-        `🚫 *Access Removed*\n\nYour grace period has ended. You have been removed from the Premium Group.\n\nRequest a new subscription using /start.`,
-        { parse_mode: 'Markdown' }
-      );
-
-      await logToChannel(bot,
-        `🚫 *User Removed After Grace Period*\nUser: \`${sub.telegramId}\`\nDays overdue: ${daysSinceExpiry}`
-      );
-
-      await AdminLog.create({
-        adminId: 0,
-        actionType: 'ban_user',
-        targetUserId: sub.telegramId,
-        details: { reason: 'Grace period expired', daysOverdue: daysSinceExpiry },
-      });
-
-    } else if (daysSinceExpiry === GRACE_DAYS - 1) {
-      const plans = await getRenewalPlansByCategory(sub.planCategory || 'general');
-      await safeSend(bot, sub.telegramId,
-        `🔴 *Final Warning!*\n\nYou will be removed from the Premium Group in *1 day* if you don't renew.\n\nRenew now to keep access!`,
-        {
-          parse_mode: 'Markdown',
-          reply_markup: renewalKeyboard(plans),
-        }
-      );
-
-    } else if (daysSinceExpiry === 1) {
-      const plans = await getRenewalPlansByCategory(sub.planCategory || 'general');
-      await safeSend(bot, sub.telegramId,
-        `⚠️ *Grace Period Reminder*\n\nYour subscription has expired. You have ${GRACE_DAYS - 1} days left before removal.`,
-        {
-          parse_mode: 'Markdown',
-          reply_markup: renewalKeyboard(plans),
-        }
-      );
-    }
+    await AdminLog.create({
+      adminId: 0,
+      actionType: 'ban_user',
+      targetUserId: sub.telegramId,
+      details: { reason: 'Subscription expired' },
+    });
   }
 };
 
@@ -496,7 +438,7 @@ const inviteLinkExpiryNotifier = async (bot) => {
   const now = new Date();
 
   const subsWithInvite = await Subscription.find({
-    status: { $in: ['active', 'grace'] },
+    status: 'active',
     inviteLink: { $ne: null },
     inviteLinkIssuedAt: { $ne: null },
   }).select('telegramId planName inviteLink inviteLinkIssuedAt inviteLinkTtlMinutes');
@@ -556,8 +498,8 @@ const initCronJobs = (bot) => {
   for (const schedule of REMINDER_CRON_SCHEDULES) {
     cron.schedule(schedule, () => reminderScheduler(bot), cronOptions);
   }
-  for (const schedule of GRACE_REMINDER_CRON_SCHEDULES) {
-    cron.schedule(schedule, () => gracePeriodHandler(bot), cronOptions);
+  for (const schedule of EXPIRY_ENFORCEMENT_CRON_SCHEDULES) {
+    cron.schedule(schedule, () => expiryEnforcementHandler(bot), cronOptions);
   }
   cron.schedule('0 10 * * *', () => inactiveUserDetector(bot), cronOptions); // 10:00 AM
   cron.schedule('0 11 * * *', () => membershipMonitor(bot), cronOptions);    // 11:00 AM
@@ -567,7 +509,7 @@ const initCronJobs = (bot) => {
   cron.schedule('0 */2 * * *', () => pendingRequestReminderJob(bot), cronOptions); // every 2 hours
 
   logger.info(`Reminder schedules initialized: ${REMINDER_CRON_SCHEDULES.join(' | ')}`);
-  logger.info(`Grace reminder schedules initialized: ${GRACE_REMINDER_CRON_SCHEDULES.join(' | ')}`);
+  logger.info(`Expiry enforcement schedules initialized: ${EXPIRY_ENFORCEMENT_CRON_SCHEDULES.join(' | ')}`);
   logger.info(`All cron jobs initialized. Timezone: ${CRON_TIMEZONE}`);
 };
 
@@ -575,7 +517,7 @@ module.exports = {
   initCronJobs,
   logToChannel,
   reminderScheduler,
-  gracePeriodHandler,
+  expiryEnforcementHandler,
   inactiveUserDetector,
   membershipMonitor,
   dailySummaryJob,

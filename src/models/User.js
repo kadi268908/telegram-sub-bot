@@ -90,11 +90,6 @@ const userSchema = new mongoose.Schema({
     default: Date.now,
     index: true,
   },
-  // Grace period tracking (days after expiry before removal)
-  graceDaysRemaining: {
-    type: Number,
-    default: null,
-  },
   // Flexible metadata (e.g. awaitingSupport flag)
   meta: {
     type: mongoose.Schema.Types.Mixed,
