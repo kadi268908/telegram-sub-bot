@@ -44,8 +44,8 @@ const requestSchema = new mongoose.Schema({
   },
   requestCategory: {
     type: String,
-    enum: ['movie', 'desi', 'non_desi', 'movie_desi', 'movie_non_desi', 'general'],
-    default: 'general',
+    enum: ['movie', 'desi', 'non_desi', 'combo', 'movie_desi', 'movie_non_desi', 'general'],
+    default: 'combo',
     index: true,
   },
   paymentProof: {

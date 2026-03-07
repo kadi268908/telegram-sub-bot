@@ -30,8 +30,8 @@ const planSchema = new mongoose.Schema({
   },
   category: {
     type: String,
-    enum: ['movie', 'desi', 'non_desi', 'movie_desi', 'movie_non_desi', 'general'],
-    default: 'general',
+    enum: ['movie', 'desi', 'non_desi', 'combo', 'movie_desi', 'movie_non_desi', 'general'],
+    default: 'combo',
     index: true,
   },
   isActive: {

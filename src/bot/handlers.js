@@ -49,8 +49,7 @@ const PLAN_CATEGORY = {
   MOVIE: 'movie',
   DESI: 'desi',
   NON_DESI: 'non_desi',
-  MOVIE_DESI: 'movie_desi',
-  MOVIE_NON_DESI: 'movie_non_desi',
+  COMBO: 'combo',
   GENERAL: 'general',
 };
 
@@ -58,8 +57,7 @@ const PLAN_CATEGORY_LABELS = {
   [PLAN_CATEGORY.MOVIE]: 'Movie Premium',
   [PLAN_CATEGORY.DESI]: 'Desi Premium',
   [PLAN_CATEGORY.NON_DESI]: 'Non Desi Premium',
-  [PLAN_CATEGORY.MOVIE_DESI]: 'Movie + Desi Combo',
-  [PLAN_CATEGORY.MOVIE_NON_DESI]: 'Movie + Non Desi Combo',
+  [PLAN_CATEGORY.COMBO]: 'Movie + Desi + Non Desi Combo',
   [PLAN_CATEGORY.GENERAL]: 'General Premium',
 };
 
@@ -67,16 +65,14 @@ const PLAN_CATEGORY_BUTTON_LABELS = {
   [PLAN_CATEGORY.MOVIE]: 'Movie Plan',
   [PLAN_CATEGORY.DESI]: 'Desi Po*n Plan',
   [PLAN_CATEGORY.NON_DESI]: 'Non-Desi Po*n Plan',
-  [PLAN_CATEGORY.MOVIE_DESI]: 'Movie + Desi Combo',
-  [PLAN_CATEGORY.MOVIE_NON_DESI]: 'Movie + Non-Desi Combo',
+  [PLAN_CATEGORY.COMBO]: 'Movie + Desi + Non-Desi Combo',
 };
 
 const QR_ASSET_BY_CATEGORY = {
   [PLAN_CATEGORY.MOVIE]: 'qr-code.jpg',
   [PLAN_CATEGORY.DESI]: 'qr-code.jpg',
   [PLAN_CATEGORY.NON_DESI]: 'qr-code.jpg',
-  [PLAN_CATEGORY.MOVIE_DESI]: 'qr-code.jpg',
-  [PLAN_CATEGORY.MOVIE_NON_DESI]: 'qr-code.jpg',
+  [PLAN_CATEGORY.COMBO]: 'qr-code.jpg',
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -92,18 +88,22 @@ const escapeMarkdown = (value) => {
 };
 
 const normalizePlanCategory = (value) => {
-  const normalized = String(value || PLAN_CATEGORY.GENERAL).toLowerCase().replace(/[-\s]/g, '_');
+  const normalized = String(value || PLAN_CATEGORY.COMBO).toLowerCase().replace(/[-\s]/g, '_');
+
+  if (['movie_desi', 'movie_non_desi', PLAN_CATEGORY.GENERAL].includes(normalized)) {
+    return PLAN_CATEGORY.COMBO;
+  }
+
   if ([
     PLAN_CATEGORY.MOVIE,
     PLAN_CATEGORY.DESI,
     PLAN_CATEGORY.NON_DESI,
-    PLAN_CATEGORY.MOVIE_DESI,
-    PLAN_CATEGORY.MOVIE_NON_DESI,
+    PLAN_CATEGORY.COMBO,
     PLAN_CATEGORY.GENERAL,
   ].includes(normalized)) {
     return normalized;
   }
-  return PLAN_CATEGORY.GENERAL;
+  return PLAN_CATEGORY.COMBO;
 };
 
 const getPlanCategoryLabel = (category) => {
@@ -428,8 +428,7 @@ const registerUserHandlers = (bot) => {
     { category: PLAN_CATEGORY.MOVIE, text: '🎬 Movie Plan', callback: 'plan_menu_movie', style: 'primary' },
     { category: PLAN_CATEGORY.DESI, text: '🔥 Desi Po*n Plan', callback: 'plan_menu_desi', style: 'primary' },
     { category: PLAN_CATEGORY.NON_DESI, text: '🌍 Non-Desi Po*n Plan', callback: 'plan_menu_non_desi', style: 'primary' },
-    { category: PLAN_CATEGORY.MOVIE_DESI, text: '🎬+🔥 Movie + Desi Combo', callback: 'plan_menu_movie_desi', style: 'success' },
-    { category: PLAN_CATEGORY.MOVIE_NON_DESI, text: '🎬+🌍 Movie + Non-Desi Combo', callback: 'plan_menu_movie_non_desi', style: 'success' },
+    { category: PLAN_CATEGORY.COMBO, text: '🎬+🔥+🌍 Movie + Desi + Non-Desi Combo', callback: 'plan_menu_combo', style: 'success' },
   ];
 
   const checkPlansKeyboard = async () => {
@@ -459,8 +458,7 @@ const registerUserHandlers = (bot) => {
     [withStyle(Markup.button.callback('🎬 Movie Premium', 'request_premium_movie'), 'success')],
     [withStyle(Markup.button.callback('🔥 Desi Premium', 'request_premium_desi'), 'success')],
     [withStyle(Markup.button.callback('🌍 Non Desi Premium', 'request_premium_non_desi'), 'success')],
-    [withStyle(Markup.button.callback('🎬+🔥 Movie + Desi Combo', 'request_premium_movie_desi'), 'primary')],
-    [withStyle(Markup.button.callback('🎬+🌍 Movie + Non-Desi Combo', 'request_premium_movie_non_desi'), 'primary')],
+    [withStyle(Markup.button.callback('🎬+🔥+🌍 Movie + Desi + Non-Desi Combo', 'request_premium_combo'), 'primary')],
     [Markup.button.callback('🎫 Support Chat', 'open_support')],
   ]);
 
@@ -475,11 +473,8 @@ const registerUserHandlers = (bot) => {
     if (categories.includes(PLAN_CATEGORY.NON_DESI)) {
       rows.push([withStyle(Markup.button.callback('🔄 Renew Non Desi Premium', 'status_renew_non_desi'), 'success')]);
     }
-    if (categories.includes(PLAN_CATEGORY.MOVIE_DESI)) {
-      rows.push([withStyle(Markup.button.callback('🔄 Renew Movie + Desi Combo', 'status_renew_movie_desi'), 'success')]);
-    }
-    if (categories.includes(PLAN_CATEGORY.MOVIE_NON_DESI)) {
-      rows.push([withStyle(Markup.button.callback('🔄 Renew Movie + Non-Desi Combo', 'status_renew_movie_non_desi'), 'success')]);
+    if (categories.includes(PLAN_CATEGORY.COMBO)) {
+      rows.push([withStyle(Markup.button.callback('🔄 Renew Movie + Desi + Non-Desi Combo', 'status_renew_combo'), 'success')]);
     }
     rows.push([withStyle(Markup.button.callback('🏠 Main Menu', 'back_to_main'), 'primary')]);
     return Markup.inlineKeyboard(rows);
@@ -894,10 +889,21 @@ const registerUserHandlers = (bot) => {
     }
   });
 
+  bot.action('request_premium_combo', async (ctx) => {
+    await ctx.answerCbQuery('Submitting...');
+    try {
+      await submitPremiumRequest(ctx, PLAN_CATEGORY.COMBO);
+    } catch (err) {
+      logger.error(`request_premium_combo error: ${err.message}`);
+      await ctx.reply('❌ Request failed. Please try again.');
+    }
+  });
+
+  // Legacy callback aliases kept for old messages already sent to users.
   bot.action('request_premium_movie_desi', async (ctx) => {
     await ctx.answerCbQuery('Submitting...');
     try {
-      await submitPremiumRequest(ctx, PLAN_CATEGORY.MOVIE_DESI);
+      await submitPremiumRequest(ctx, PLAN_CATEGORY.COMBO);
     } catch (err) {
       logger.error(`request_premium_movie_desi error: ${err.message}`);
       await ctx.reply('❌ Request failed. Please try again.');
@@ -907,7 +913,7 @@ const registerUserHandlers = (bot) => {
   bot.action('request_premium_movie_non_desi', async (ctx) => {
     await ctx.answerCbQuery('Submitting...');
     try {
-      await submitPremiumRequest(ctx, PLAN_CATEGORY.MOVIE_NON_DESI);
+      await submitPremiumRequest(ctx, PLAN_CATEGORY.COMBO);
     } catch (err) {
       logger.error(`request_premium_movie_non_desi error: ${err.message}`);
       await ctx.reply('❌ Request failed. Please try again.');
@@ -931,8 +937,7 @@ const registerUserHandlers = (bot) => {
             PLAN_CATEGORY.MOVIE,
             PLAN_CATEGORY.DESI,
             PLAN_CATEGORY.NON_DESI,
-            PLAN_CATEGORY.MOVIE_DESI,
-            PLAN_CATEGORY.MOVIE_NON_DESI,
+            PLAN_CATEGORY.COMBO,
           ].includes(category));
 
         let message = `📊 *Your Subscription Status*\n\n` +
@@ -993,7 +998,7 @@ const registerUserHandlers = (bot) => {
     await showStatus(ctx);
   });
 
-  bot.action(/^status_renew_(movie|desi|non_desi|movie_desi|movie_non_desi)$/, async (ctx) => {
+  bot.action(/^status_renew_(movie|desi|non_desi|combo|movie_desi|movie_non_desi)$/, async (ctx) => {
     await ctx.answerCbQuery();
     try {
       const category = normalizePlanCategory(ctx.match[1]);

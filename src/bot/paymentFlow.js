@@ -32,7 +32,7 @@ const registerPaymentFlow = ({
     submitPremiumRequest,
     getActiveTicket,
 }) => {
-    bot.action(/^plan_menu_(movie|desi|non_desi|movie_desi|movie_non_desi)$/, async (ctx) => {
+    bot.action(/^plan_menu_(movie|desi|non_desi|combo|movie_desi|movie_non_desi)$/, async (ctx) => {
         await ctx.answerCbQuery();
         try {
             const category = normalizePlanCategory(ctx.match[1]);
@@ -78,7 +78,7 @@ const registerPaymentFlow = ({
         }
     });
 
-    bot.action(/^paid_(movie|desi|non_desi|movie_desi|movie_non_desi)$/, async (ctx) => {
+    bot.action(/^paid_(movie|desi|non_desi|combo|movie_desi|movie_non_desi)$/, async (ctx) => {
         await ctx.answerCbQuery();
         try {
             const callbackMessageId = ctx.callbackQuery?.message?.message_id;
@@ -157,7 +157,7 @@ const registerPaymentFlow = ({
         }
     });
 
-    bot.action(/^renew_request_(?:(movie|desi|non_desi|movie_desi|movie_non_desi)_)?(.+)$/, async (ctx) => {
+    bot.action(/^renew_request_(?:(movie|desi|non_desi|combo|movie_desi|movie_non_desi)_)?(.+)$/, async (ctx) => {
         await ctx.answerCbQuery('Continue with payment screenshot...');
         try {
             const categoryFromCallback = normalizePlanCategory(ctx.match[1] || PLAN_CATEGORY.GENERAL);

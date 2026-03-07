@@ -2,17 +2,28 @@ const PLAN_CATEGORY = {
     MOVIE: 'movie',
     DESI: 'desi',
     NON_DESI: 'non_desi',
-    MOVIE_DESI: 'movie_desi',
-    MOVIE_NON_DESI: 'movie_non_desi',
+    COMBO: 'combo',
     GENERAL: 'general',
 };
 
 const normalizePlanCategory = (value) => {
-    const normalized = String(value || PLAN_CATEGORY.GENERAL).toLowerCase().replace(/[-\s]/g, '_');
-    if (Object.values(PLAN_CATEGORY).includes(normalized)) {
+    const normalized = String(value || PLAN_CATEGORY.COMBO).toLowerCase().replace(/[-\s]/g, '_');
+
+    if ([
+        PLAN_CATEGORY.MOVIE,
+        PLAN_CATEGORY.DESI,
+        PLAN_CATEGORY.NON_DESI,
+        PLAN_CATEGORY.COMBO,
+    ].includes(normalized)) {
         return normalized;
     }
-    return PLAN_CATEGORY.GENERAL;
+
+    // Legacy aliases now collapse into one unified combo category.
+    if (['movie_desi', 'movie_non_desi', PLAN_CATEGORY.GENERAL].includes(normalized)) {
+        return PLAN_CATEGORY.COMBO;
+    }
+
+    return PLAN_CATEGORY.COMBO;
 };
 
 const getGroupIdForCategory = (category) => {
@@ -27,16 +38,17 @@ const getGroupIdsForCategory = (category) => {
         [PLAN_CATEGORY.MOVIE]: process.env.MOVIE_PREMIUM_GROUP_ID,
         [PLAN_CATEGORY.DESI]: process.env.DESI_PREMIUM_GROUP_ID,
         [PLAN_CATEGORY.NON_DESI]: process.env.NON_DESI_PREMIUM_GROUP_ID,
-        [PLAN_CATEGORY.GENERAL]: process.env.PREMIUM_GROUP_ID,
     };
 
     const mapping = {
         [PLAN_CATEGORY.MOVIE]: [singleCategoryGroupMap[PLAN_CATEGORY.MOVIE]],
         [PLAN_CATEGORY.DESI]: [singleCategoryGroupMap[PLAN_CATEGORY.DESI]],
         [PLAN_CATEGORY.NON_DESI]: [singleCategoryGroupMap[PLAN_CATEGORY.NON_DESI]],
-        [PLAN_CATEGORY.MOVIE_DESI]: [singleCategoryGroupMap[PLAN_CATEGORY.MOVIE], singleCategoryGroupMap[PLAN_CATEGORY.DESI]],
-        [PLAN_CATEGORY.MOVIE_NON_DESI]: [singleCategoryGroupMap[PLAN_CATEGORY.MOVIE], singleCategoryGroupMap[PLAN_CATEGORY.NON_DESI]],
-        [PLAN_CATEGORY.GENERAL]: [singleCategoryGroupMap[PLAN_CATEGORY.GENERAL]],
+        [PLAN_CATEGORY.COMBO]: [
+            singleCategoryGroupMap[PLAN_CATEGORY.MOVIE],
+            singleCategoryGroupMap[PLAN_CATEGORY.DESI],
+            singleCategoryGroupMap[PLAN_CATEGORY.NON_DESI],
+        ],
     };
 
     const selected = mapping[normalized] || [process.env.PREMIUM_GROUP_ID];

@@ -30,13 +30,35 @@ const { generateInviteLink, isGroupMember, safeSend, banFromGroup, unbanFromGrou
 const { PLAN_CATEGORY, normalizePlanCategory, getGroupIdForCategory, getAllPremiumGroupIds } = require('../utils/premiumGroups');
 const logger = require('../utils/logger');
 
-const expandComboCategories = (category) => {
-  const normalized = normalizePlanCategory(category);
-  if (normalized === PLAN_CATEGORY.MOVIE_DESI) {
+const parseComboPlanTargetsFromName = (planName) => {
+  const slug = String(planName || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+
+  if (slug === 'movie_desi') {
     return [PLAN_CATEGORY.MOVIE, PLAN_CATEGORY.DESI];
   }
-  if (normalized === PLAN_CATEGORY.MOVIE_NON_DESI) {
+
+  if (slug === 'movie_non_desi') {
     return [PLAN_CATEGORY.MOVIE, PLAN_CATEGORY.NON_DESI];
+  }
+
+  if (slug === 'movie_desi_non_desi') {
+    return [PLAN_CATEGORY.MOVIE, PLAN_CATEGORY.DESI, PLAN_CATEGORY.NON_DESI];
+  }
+
+  return null;
+};
+
+const expandComboCategories = (category, planName = '') => {
+  const normalized = normalizePlanCategory(category);
+  if (normalized === PLAN_CATEGORY.COMBO) {
+    const parsedFromName = parseComboPlanTargetsFromName(planName);
+    if (parsedFromName?.length) return parsedFromName;
+
+    // Fallback for generic combo plans: grant all 3 premium categories.
+    return [PLAN_CATEGORY.MOVIE, PLAN_CATEGORY.DESI, PLAN_CATEGORY.NON_DESI];
   }
   return [normalized];
 };
@@ -46,6 +68,7 @@ const getCategoryShortLabel = (category) => {
   if (normalized === PLAN_CATEGORY.MOVIE) return 'Movie';
   if (normalized === PLAN_CATEGORY.DESI) return 'Desi';
   if (normalized === PLAN_CATEGORY.NON_DESI) return 'Non Desi';
+  if (normalized === PLAN_CATEGORY.COMBO) return 'Combo';
   return normalized;
 };
 
@@ -422,7 +445,7 @@ const registerAdminHandlers = (bot) => {
         return ctx.answerCbQuery('❌ Plan category mismatch for this request', { show_alert: true });
       }
 
-      const targetCategories = [...new Set(expandComboCategories(resolvedPlanCategory))];
+      const targetCategories = [...new Set(expandComboCategories(resolvedPlanCategory, plan.name))];
       const categoryGroupPairs = targetCategories.map((category) => ({
         category,
         groupId: getGroupIdForCategory(category),

@@ -10,6 +10,7 @@ const mongoose = require('mongoose');
 const SellerWithdrawalRequest = require('../models/SellerWithdrawalRequest');
 const SellerPayoutLedger = require('../models/SellerPayoutLedger');
 const UserOffer = require('../models/UserOffer');
+const { normalizePlanCategory, PLAN_CATEGORY } = require('../utils/premiumGroups');
 const {
   addAdmin, removeAdmin, createPlan, updatePlan, deletePlan,
   getAllPlans, getActivePlans, createOffer, deleteOffer, getActiveOffers
@@ -102,10 +103,15 @@ const registerSuperAdminHandlers = (bot) => {
     const [name, days, price, rawCategory] = text.split('|').map(s => s.trim());
     if (!name || !days || !rawCategory) return ctx.reply('Usage: `/createplan Name|days|price|category`', { parse_mode: 'Markdown' });
     try {
-      const normalizedCategory = String(rawCategory).toLowerCase().replace(/[-\s]/g, '_');
-      const allowedCategories = new Set(['movie', 'desi', 'non_desi', 'movie_desi', 'movie_non_desi', 'general']);
+      const normalizedCategory = normalizePlanCategory(rawCategory);
+      const allowedCategories = new Set([
+        PLAN_CATEGORY.MOVIE,
+        PLAN_CATEGORY.DESI,
+        PLAN_CATEGORY.NON_DESI,
+        PLAN_CATEGORY.COMBO,
+      ]);
       if (!allowedCategories.has(normalizedCategory)) {
-        return ctx.reply('❌ Invalid category. Use: movie, desi, non_desi, movie_desi, movie_non_desi');
+        return ctx.reply('❌ Invalid category. Use: movie, desi, non_desi, combo');
       }
 
       const plan = await createPlan({
@@ -192,17 +198,17 @@ const registerSuperAdminHandlers = (bot) => {
       movie: [],
       desi: [],
       non_desi: [],
-      general: [],
+      combo: [],
     };
 
     plans.forEach((plan) => {
-      const category = String(plan.category || 'general');
+      const category = normalizePlanCategory(plan.category || 'combo');
       if (!grouped[category]) grouped[category] = [];
       grouped[category].push(plan);
     });
 
     let msg = '📋 *All Plans (Category-wise)*\n\n';
-    const orderedCategories = ['movie', 'desi', 'non_desi', 'general'];
+    const orderedCategories = ['movie', 'desi', 'non_desi', 'combo'];
 
     for (const category of orderedCategories) {
       const items = grouped[category] || [];
@@ -756,9 +762,7 @@ const registerSuperAdminHandlers = (bot) => {
         movie: 'Movie',
         desi: 'Desi',
         non_desi: 'Non-Desi',
-        movie_desi: 'Movie + Desi',
-        movie_non_desi: 'Movie + Non-Desi',
-        general: 'General',
+        combo: 'Combo',
       };
 
       let categorySection = '\n\n📂 *Category-wise*\n';
@@ -796,9 +800,7 @@ const registerSuperAdminHandlers = (bot) => {
         movie: 'Movie',
         desi: 'Desi',
         non_desi: 'Non-Desi',
-        movie_desi: 'Movie + Desi',
-        movie_non_desi: 'Movie + Non-Desi',
-        general: 'General',
+        combo: 'Combo',
       };
 
       const rows = [
@@ -1345,14 +1347,12 @@ const buildMarkdownChunks = (header, lines, maxLength = 3500) => {
 };
 
 const buildCategoryWiseSalesReportMessages = (title, rows, maxLength = 3500) => {
-  const categoryOrder = ['movie', 'desi', 'non_desi', 'movie_desi', 'movie_non_desi', 'general'];
+  const categoryOrder = ['movie', 'desi', 'non_desi', 'combo'];
   const categoryLabel = {
     movie: 'Movie',
     desi: 'Desi',
     non_desi: 'Non-Desi',
-    movie_desi: 'Movie + Desi',
-    movie_non_desi: 'Movie + Non-Desi',
-    general: 'General',
+    combo: 'Combo',
   };
 
   const grouped = {};
@@ -1361,7 +1361,7 @@ const buildCategoryWiseSalesReportMessages = (title, rows, maxLength = 3500) => 
   });
 
   rows.forEach((row) => {
-    const key = categoryOrder.includes(row.planCategory) ? row.planCategory : 'general';
+    const key = categoryOrder.includes(row.planCategory) ? row.planCategory : 'combo';
     grouped[key].push(row);
   });
 

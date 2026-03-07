@@ -35,7 +35,7 @@ const getGrowthStats = async () => {
 const getCategoryWiseStats = async () => {
   const today = startOfToday();
   const todayEnd = endOfToday();
-  const categories = ['movie', 'desi', 'non_desi', 'movie_desi', 'movie_non_desi', 'general'];
+  const categories = ['movie', 'desi', 'non_desi', 'combo'];
 
   const [activeSubscriptionsRaw, pendingRequestsRaw, approvalsTodayRaw, renewalsTodayRaw] = await Promise.all([
     Subscription.aggregate([
@@ -97,9 +97,21 @@ const getCategoryWiseStats = async () => {
 
   const toCountMap = (rows) => {
     const map = {};
+
+    const normalizeStatsCategory = (value) => {
+      const raw = String(value || '').toLowerCase();
+      if (raw === 'movie' || raw === 'desi' || raw === 'non_desi' || raw === 'combo') {
+        return raw;
+      }
+      if (raw === 'movie_desi' || raw === 'movie_non_desi' || raw === 'general' || !raw) {
+        return 'combo';
+      }
+      return 'combo';
+    };
+
     rows.forEach((row) => {
-      const key = row?._id || 'general';
-      map[key] = Number(row?.count || 0);
+      const key = normalizeStatsCategory(row?._id);
+      map[key] = Number(map[key] || 0) + Number(row?.count || 0);
     });
     return map;
   };
