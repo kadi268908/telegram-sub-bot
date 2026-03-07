@@ -514,6 +514,7 @@ const registerUserHandlers = (bot) => {
   const sendMainMenuMessage = async (ctx, userName = 'User') => {
     await ctx.reply(
       `👋 *Welcome, ${escapeMarkdown(userName)}!*\n\n` +
+      `Help k liye uper ki video dekhein.\n\n ` +
       `Premium lene ke liye pehle *Check Plans* pe tap karein.\n\n` +
       `Agr aapne pehle se payment kar diya hai, toh "*Already Paid for premium*" pe tap karke apna payment proof submit karein.\n\n`,
       {
@@ -526,6 +527,7 @@ const registerUserHandlers = (bot) => {
   const sendStartWelcomeMessage = async (ctx, userName = 'User') => {
     const caption =
       `👋 *Welcome, ${escapeMarkdown(userName)}!*\n\n` +
+      `Help k liye uper ki video dekhein.\n\n ` +
       `Premium lene ke liye pehle *Check Plans* pe tap karein.\n\n` +
       `Agr aapne pehle se payment kar diya hai, toh "*Already Paid for premium*" pe tap karke apna payment proof submit karein.\n\n`;
 
