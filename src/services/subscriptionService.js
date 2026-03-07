@@ -155,6 +155,37 @@ const getSalesReport = async (startDate, endDate) => {
       },
     },
     {
+      $lookup: {
+        from: 'subscriptions',
+        let: {
+          reqTelegramId: '$telegramId',
+          reqPlanId: '$selectedPlanId',
+          reqCategory: '$requestCategory',
+        },
+        pipeline: [
+          {
+            $match: {
+              $expr: {
+                $and: [
+                  { $eq: ['$telegramId', '$$reqTelegramId'] },
+                  { $eq: ['$planId', '$$reqPlanId'] },
+                  { $eq: ['$planCategory', '$$reqCategory'] },
+                  { $eq: ['$status', 'cancelled'] },
+                ],
+              },
+            },
+          },
+          { $limit: 1 },
+        ],
+        as: 'revokedSubscriptions',
+      },
+    },
+    {
+      $match: {
+        $expr: { $eq: [{ $size: '$revokedSubscriptions' }, 0] },
+      },
+    },
+    {
       $group: {
         _id: '$selectedPlanId',
         planName: { $first: { $ifNull: ['$plan.name', 'Unknown Plan'] } },
@@ -212,6 +243,37 @@ const getSalesUserBreakdown = async (startDate, endDate) => {
             '$basePrice',
           ],
         },
+      },
+    },
+    {
+      $lookup: {
+        from: 'subscriptions',
+        let: {
+          reqTelegramId: '$telegramId',
+          reqPlanId: '$selectedPlanId',
+          reqCategory: '$requestCategory',
+        },
+        pipeline: [
+          {
+            $match: {
+              $expr: {
+                $and: [
+                  { $eq: ['$telegramId', '$$reqTelegramId'] },
+                  { $eq: ['$planId', '$$reqPlanId'] },
+                  { $eq: ['$planCategory', '$$reqCategory'] },
+                  { $eq: ['$status', 'cancelled'] },
+                ],
+              },
+            },
+          },
+          { $limit: 1 },
+        ],
+        as: 'revokedSubscriptions',
+      },
+    },
+    {
+      $match: {
+        $expr: { $eq: [{ $size: '$revokedSubscriptions' }, 0] },
       },
     },
     {
