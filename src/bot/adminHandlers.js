@@ -1229,6 +1229,15 @@ const registerAdminHandlers = (bot) => {
       const defaultTitle = 'Special Discount';
       const defaultDescription = 'Only for you!';
 
+      // Keep only one active one-time private offer per user: remove all previous active offers.
+      await UserOffer.deleteMany(
+        {
+          targetTelegramId: targetId,
+          isActive: true,
+          isUsed: false,
+        }
+      );
+
       const offer = await UserOffer.create({
         targetTelegramId: targetId,
         title: defaultTitle,

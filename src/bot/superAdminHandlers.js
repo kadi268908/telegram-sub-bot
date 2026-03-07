@@ -9,6 +9,7 @@ const AdminLog = require('../models/AdminLog');
 const mongoose = require('mongoose');
 const SellerWithdrawalRequest = require('../models/SellerWithdrawalRequest');
 const SellerPayoutLedger = require('../models/SellerPayoutLedger');
+const UserOffer = require('../models/UserOffer');
 const {
   addAdmin, removeAdmin, createPlan, updatePlan, deletePlan,
   getAllPlans, getActivePlans, createOffer, deleteOffer, getActiveOffers
@@ -258,6 +259,70 @@ const registerSuperAdminHandlers = (bot) => {
       msg += `${i + 1}. *${o.title}*\n${o.description}\nValid till: ${formatDate(o.validTill)}\n\`${o._id}\`\n\n`;
     });
     await ctx.reply(msg, { parse_mode: 'Markdown' });
+  });
+
+  // ── /removeprivateoffers all|<telegramId> ────────────────────────────────
+  bot.command('removeprivateoffers', requireSuperAdmin, async (ctx) => {
+    try {
+      const raw = String(ctx.message?.text || '').replace('/removeprivateoffers', '').trim();
+      if (!raw) {
+        return ctx.reply(
+          'Usage: `/removeprivateoffers all` or `/removeprivateoffers <telegramId>`',
+          { parse_mode: 'Markdown' }
+        );
+      }
+
+      if (raw.toLowerCase() === 'all') {
+        const result = await UserOffer.deleteMany({});
+
+        await AdminLog.create({
+          adminId: ctx.from.id,
+          actionType: 'delete_offer',
+          targetUserId: null,
+          details: {
+            userSpecific: true,
+            scope: 'all',
+            deletedCount: Number(result?.deletedCount || 0),
+            command: 'removeprivateoffers',
+          },
+        });
+
+        return ctx.reply(
+          `✅ Removed *${Number(result?.deletedCount || 0)}* private offer(s) from all users.`,
+          { parse_mode: 'Markdown' }
+        );
+      }
+
+      const targetId = parseInt(raw, 10);
+      if (!targetId) {
+        return ctx.reply(
+          '❌ Invalid input. Use `all` or a valid telegramId.',
+          { parse_mode: 'Markdown' }
+        );
+      }
+
+      const result = await UserOffer.deleteMany({ targetTelegramId: targetId });
+
+      await AdminLog.create({
+        adminId: ctx.from.id,
+        actionType: 'delete_offer',
+        targetUserId: targetId,
+        details: {
+          userSpecific: true,
+          scope: 'user',
+          deletedCount: Number(result?.deletedCount || 0),
+          command: 'removeprivateoffers',
+        },
+      });
+
+      await ctx.reply(
+        `✅ Removed *${Number(result?.deletedCount || 0)}* private offer(s) for user \`${targetId}\`.`,
+        { parse_mode: 'Markdown' }
+      );
+    } catch (err) {
+      logger.error(`removeprivateoffers command error: ${err.message}`);
+      await ctx.reply('❌ Failed to remove private offers. Please try again.');
+    }
   });
 
   // ── /broadcast ─────────────────────────────────────────────────────────────

@@ -166,6 +166,7 @@ bot.command('help', async (ctx) => {
     msg += `\n*Super Admin:*\n/addadmin <id> /removeadmin <id> /admins\n` +
       `/createplan /editplan /deleteplan /pauseplan /resumeplan /listplans\n` +
       `/addoffer /deleteoffer /listoffers\n` +
+      `/removeprivateoffers all|<id> — Delete private user offers\n` +
       `/broadcast — Broadcast to users\n` +
       `/bcancel — Cancel active broadcast compose session\n` +
       `/report <Nd|Nm> — Custom CSV report (e.g. 7d, 28d, 1m)\n` +

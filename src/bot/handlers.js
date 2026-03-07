@@ -145,7 +145,7 @@ const getNextOneTimeUserOffer = async (telegramId) => {
     isActive: true,
     isUsed: false,
     validTill: { $gt: new Date() },
-  }).sort({ createdAt: 1 });
+  }).sort({ createdAt: -1 });
 };
 
 const strikeText = (value) => {
@@ -332,7 +332,7 @@ const consumeOneTimeUserOffer = async (telegramId, requestId) => {
       },
     },
     {
-      sort: { createdAt: 1 },
+      sort: { createdAt: -1 },
       new: true,
     }
   );
