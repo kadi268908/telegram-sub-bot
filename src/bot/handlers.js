@@ -44,6 +44,7 @@ const logger = require('../utils/logger');
 
 const REJOINING_PENALTY = process.env.REJOINING_PENALTY || '20';
 const lastBotMessageByChat = new Map();
+let startHelpVideoFileId = null;
 
 const PLAN_CATEGORY = {
   MOVIE: 'movie',
@@ -531,13 +532,25 @@ const registerUserHandlers = (bot) => {
       `Premium lene ke liye pehle *Check Plans* pe tap karein.\n\n` +
       `Agr aapne pehle se payment kar diya hai, toh "*Already Paid for premium*" pe tap karke apna payment proof submit karein.\n\n`;
 
-    const helpVideoPath = path.join(process.cwd(), 'assets', 'Help_Video.mp4');
-    if (!fs.existsSync(helpVideoPath)) {
-      return sendMainMenuMessage(ctx, userName);
-    }
-
     try {
-      await ctx.replyWithVideo(
+      if (startHelpVideoFileId) {
+        await ctx.replyWithVideo(
+          startHelpVideoFileId,
+          {
+            caption,
+            parse_mode: 'Markdown',
+            ...mainMenuKeyboard(),
+          }
+        );
+        return;
+      }
+
+      const helpVideoPath = path.join(process.cwd(), 'assets', 'Help_Video.mp4');
+      if (!fs.existsSync(helpVideoPath)) {
+        return sendMainMenuMessage(ctx, userName);
+      }
+
+      const sent = await ctx.replyWithVideo(
         { source: helpVideoPath },
         {
           caption,
@@ -545,6 +558,8 @@ const registerUserHandlers = (bot) => {
           ...mainMenuKeyboard(),
         }
       );
+
+      startHelpVideoFileId = sent?.video?.file_id || null;
     } catch (err) {
       logger.warn(`sendStartWelcomeMessage video send failed: ${err.message}`);
       await sendMainMenuMessage(ctx, userName);
