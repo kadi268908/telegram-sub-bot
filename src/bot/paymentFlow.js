@@ -177,12 +177,48 @@ const registerPaymentFlow = ({
                 telegramId: ctx.from.id,
                 status: 'active',
                 planCategory: renewalCategory,
+                expiryDate: { $gt: new Date() },
             });
             if (!activeSub) {
+                const hadOldSubscription = await Subscription.exists({
+                    telegramId: ctx.from.id,
+                    planCategory: renewalCategory,
+                });
+
+                if (!hadOldSubscription) {
+                    return ctx.reply(
+                        `⚠️ Aapke paas *${escapeMarkdown(getPlanCategoryLabel(renewalCategory))}* ka active subscription nahi hai.\n\n` +
+                        `Renew karne ke liye pehle us category ka active plan hona chahiye.`,
+                        { parse_mode: 'Markdown' }
+                    );
+                }
+
+                await User.findByIdAndUpdate(
+                    user._id,
+                    buildSetUserFlowUpdate(
+                        USER_FLOW_STATE.AWAITING_PAYMENT_SCREENSHOT,
+                        {
+                            'meta.paymentCategory': renewalCategory,
+                            'meta.paymentFlowType': 'new_request',
+                        },
+                        {
+                            'meta.paymentProofReadyForCategory': '',
+                            'meta.latestPaymentProof': '',
+                            'meta.renewalPlanId': '',
+                        }
+                    )
+                );
+
                 return ctx.reply(
-                    `⚠️ Aapke paas *${escapeMarkdown(getPlanCategoryLabel(renewalCategory))}* ka active subscription nahi hai.\n\n` +
-                    `Renew karne ke liye pehle us category ka active plan hona chahiye.`,
-                    { parse_mode: 'Markdown' }
+                    `ℹ️ *${escapeMarkdown(getPlanCategoryLabel(renewalCategory))}* subscription expire ho chuka hai, isliye purana renew button invalid hai.\n\n` +
+                    `Ab issi category ke liye naya request create hoga. Payment screenshot bhejiye.`,
+                    {
+                        parse_mode: 'Markdown',
+                        ...Markup.inlineKeyboard([
+                            [withStyle(Markup.button.callback('❌ Cancel Upload', 'cancel_payment_upload'), 'danger')],
+                            [withStyle(Markup.button.callback('🏠 Main Menu', 'back_to_main'), 'primary')],
+                        ]),
+                    }
                 );
             }
 
