@@ -4,6 +4,7 @@
 const Subscription = require('../models/Subscription');
 const User = require('../models/User');
 const Plan = require('../models/Plan');
+const Request = require('../models/Request');
 const { addDays, startOfToday, endOfToday, startOfWeek, startOfMonth } = require('../utils/dateUtils');
 const logger = require('../utils/logger');
 const { normalizePlanCategory, getGroupIdForCategory } = require('../utils/premiumGroups');
@@ -106,39 +107,121 @@ const getExpiredUnprocessed = async () => {
 };
 
 const getSalesReport = async (startDate, endDate) => {
-  return Subscription.aggregate([
-    { $match: { createdAt: { $gte: startDate, $lte: endDate }, status: { $in: ['active', 'expired'] } } },
-    { $lookup: { from: 'plans', localField: 'planId', foreignField: '_id', as: 'plan' } },
-    { $unwind: '$plan' },
-    { $group: { _id: '$planId', planName: { $first: '$plan.name' }, count: { $sum: 1 }, totalRevenue: { $sum: '$plan.price' } } },
-  ]);
-};
-
-const getSalesUserBreakdown = async (startDate, endDate) => {
-  return Subscription.aggregate([
+  return Request.aggregate([
     {
       $match: {
-        createdAt: { $gte: startDate, $lte: endDate },
-        status: { $in: ['active', 'expired'] },
+        status: 'approved',
+        actionDate: { $gte: startDate, $lte: endDate },
       },
     },
     {
       $lookup: {
         from: 'plans',
-        localField: 'planId',
+        localField: 'selectedPlanId',
         foreignField: '_id',
         as: 'plan',
       },
     },
     { $unwind: { path: '$plan', preserveNullAndEmptyArrays: true } },
     {
+      $addFields: {
+        basePrice: { $ifNull: ['$plan.price', 0] },
+        discountPercent: { $ifNull: ['$appliedUserOffer.discountPercent', 0] },
+      },
+    },
+    {
+      $addFields: {
+        payableAmount: {
+          $cond: [
+            { $gt: ['$discountPercent', 0] },
+            {
+              $ceil: {
+                $max: [
+                  0,
+                  {
+                    $subtract: [
+                      '$basePrice',
+                      {
+                        $multiply: ['$basePrice', { $divide: ['$discountPercent', 100] }],
+                      },
+                    ],
+                  },
+                ],
+              },
+            },
+            '$basePrice',
+          ],
+        },
+      },
+    },
+    {
+      $group: {
+        _id: '$selectedPlanId',
+        planName: { $first: { $ifNull: ['$plan.name', 'Unknown Plan'] } },
+        count: { $sum: 1 },
+        totalRevenue: { $sum: '$payableAmount' },
+      },
+    },
+    { $sort: { totalRevenue: -1 } },
+  ]);
+};
+
+const getSalesUserBreakdown = async (startDate, endDate) => {
+  return Request.aggregate([
+    {
+      $match: {
+        status: 'approved',
+        actionDate: { $gte: startDate, $lte: endDate },
+      },
+    },
+    {
+      $lookup: {
+        from: 'plans',
+        localField: 'selectedPlanId',
+        foreignField: '_id',
+        as: 'plan',
+      },
+    },
+    { $unwind: { path: '$plan', preserveNullAndEmptyArrays: true } },
+    {
+      $addFields: {
+        basePrice: { $ifNull: ['$plan.price', 0] },
+        discountPercent: { $ifNull: ['$appliedUserOffer.discountPercent', 0] },
+      },
+    },
+    {
+      $addFields: {
+        payableAmount: {
+          $cond: [
+            { $gt: ['$discountPercent', 0] },
+            {
+              $ceil: {
+                $max: [
+                  0,
+                  {
+                    $subtract: [
+                      '$basePrice',
+                      {
+                        $multiply: ['$basePrice', { $divide: ['$discountPercent', 100] }],
+                      },
+                    ],
+                  },
+                ],
+              },
+            },
+            '$basePrice',
+          ],
+        },
+      },
+    },
+    {
       $project: {
         _id: 0,
         telegramId: 1,
-        planCategory: 1,
-        planName: 1,
-        planPrice: { $ifNull: ['$plan.price', 0] },
-        createdAt: 1,
+        planCategory: { $ifNull: ['$plan.category', '$requestCategory'] },
+        planName: { $ifNull: ['$plan.name', 'Unknown Plan'] },
+        planPrice: '$payableAmount',
+        createdAt: '$actionDate',
       },
     },
     { $sort: { createdAt: -1 } },
