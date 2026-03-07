@@ -325,6 +325,32 @@ const registerSuperAdminHandlers = (bot) => {
     }
   });
 
+  // ── /listprivateoffers ────────────────────────────────────────────────────
+  bot.command('listprivateoffers', requireSuperAdmin, async (ctx) => {
+    try {
+      const offers = await UserOffer.find({ isUsed: false })
+        .sort({ targetTelegramId: 1, createdAt: -1 })
+        .lean();
+
+      if (!offers.length) {
+        return ctx.reply('No non-redeemed private offers found.');
+      }
+
+      const lines = ['id|offers|admin_id'];
+      offers.forEach((offer) => {
+        const offerLabel = offer?.discountPercent > 0
+          ? `${offer.discountPercent}%`
+          : (offer?.title || 'offer');
+        lines.push(`${offer.targetTelegramId}|${offerLabel}|${offer.createdBy}`);
+      });
+
+      await ctx.reply(`\`${lines.join('\n')}\``, { parse_mode: 'Markdown' });
+    } catch (err) {
+      logger.error(`listprivateoffers command error: ${err.message}`);
+      await ctx.reply('❌ Failed to fetch private offers list.');
+    }
+  });
+
   // ── /broadcast ─────────────────────────────────────────────────────────────
   bot.command('broadcast', requireSuperAdmin, async (ctx) => {
     await ctx.reply('📢 *Broadcast — Choose Target:*', {

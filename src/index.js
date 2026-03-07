@@ -167,6 +167,7 @@ bot.command('help', async (ctx) => {
       `/createplan /editplan /deleteplan /pauseplan /resumeplan /listplans\n` +
       `/addoffer /deleteoffer /listoffers\n` +
       `/removeprivateoffers all|<id> — Delete private user offers\n` +
+      `/listprivateoffers — List non-redeemed private offers\n` +
       `/broadcast — Broadcast to users\n` +
       `/bcancel — Cancel active broadcast compose session\n` +
       `/report <Nd|Nm> — Custom CSV report (e.g. 7d, 28d, 1m)\n` +
