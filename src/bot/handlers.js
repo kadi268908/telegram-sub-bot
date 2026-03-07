@@ -523,6 +523,32 @@ const registerUserHandlers = (bot) => {
     );
   };
 
+  const sendStartWelcomeMessage = async (ctx, userName = 'User') => {
+    const caption =
+      `👋 *Welcome, ${escapeMarkdown(userName)}!*\n\n` +
+      `Premium lene ke liye pehle *Check Plans* pe tap karein.\n\n` +
+      `Agr aapne pehle se payment kar diya hai, toh "*Already Paid for premium*" pe tap karke apna payment proof submit karein.\n\n`;
+
+    const helpVideoPath = path.join(process.cwd(), 'assets', 'Help_Video.mp4');
+    if (!fs.existsSync(helpVideoPath)) {
+      return sendMainMenuMessage(ctx, userName);
+    }
+
+    try {
+      await ctx.replyWithVideo(
+        { source: helpVideoPath },
+        {
+          caption,
+          parse_mode: 'Markdown',
+          ...mainMenuKeyboard(),
+        }
+      );
+    } catch (err) {
+      logger.warn(`sendStartWelcomeMessage video send failed: ${err.message}`);
+      await sendMainMenuMessage(ctx, userName);
+    }
+  };
+
   bot.command('menu', async (ctx) => {
     try {
       const user = await findOrCreateUser(ctx.from);
@@ -701,7 +727,7 @@ const registerUserHandlers = (bot) => {
         await processReferral(user, payload.replace('ref_', ''));
       }
 
-      await sendMainMenuMessage(ctx, user.name);
+      await sendStartWelcomeMessage(ctx, user.name);
     } catch (err) {
       logger.error(`/start error: ${err.message}`);
       await ctx.reply('❌ Something went wrong. Please try again.');
