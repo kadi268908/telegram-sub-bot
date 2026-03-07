@@ -57,7 +57,7 @@ const PLAN_CATEGORY_LABELS = {
   [PLAN_CATEGORY.MOVIE]: 'Movie Premium',
   [PLAN_CATEGORY.DESI]: 'Desi Premium',
   [PLAN_CATEGORY.NON_DESI]: 'Non Desi Premium',
-  [PLAN_CATEGORY.COMBO]: 'Movie + Desi + Non Desi Combo',
+  [PLAN_CATEGORY.COMBO]: 'Combo',
   [PLAN_CATEGORY.GENERAL]: 'General Premium',
 };
 
@@ -65,7 +65,7 @@ const PLAN_CATEGORY_BUTTON_LABELS = {
   [PLAN_CATEGORY.MOVIE]: 'Movie Plan',
   [PLAN_CATEGORY.DESI]: 'Desi Po*n Plan',
   [PLAN_CATEGORY.NON_DESI]: 'Non-Desi Po*n Plan',
-  [PLAN_CATEGORY.COMBO]: 'Movie + Desi + Non-Desi Combo',
+  [PLAN_CATEGORY.COMBO]: 'Combo',
 };
 
 const QR_ASSET_BY_CATEGORY = {

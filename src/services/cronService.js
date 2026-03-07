@@ -41,9 +41,9 @@ const REQUEST_CATEGORY_LABELS = {
   desi: 'Desi Premium',
   non_desi: 'Non Desi Premium',
   combo: 'Movie + Desi + Non Desi Combo',
-  movie_desi: 'Movie + Desi + Non Desi Combo',
-  movie_non_desi: 'Movie + Desi + Non Desi Combo',
-  general: 'Movie + Desi + Non Desi Combo',
+  movie_desi: 'Movie + Desi Combo',
+  movie_non_desi: 'Movie + Non Desi Combo',
+  general: 'General',
 };
 
 const getRequestCategoryLabel = (category) => {
