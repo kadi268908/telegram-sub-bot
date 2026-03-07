@@ -108,10 +108,9 @@ const registerSuperAdminHandlers = (bot) => {
         PLAN_CATEGORY.MOVIE,
         PLAN_CATEGORY.DESI,
         PLAN_CATEGORY.NON_DESI,
-        PLAN_CATEGORY.COMBO,
       ]);
       if (!allowedCategories.has(normalizedCategory)) {
-        return ctx.reply('❌ Invalid category. Use: movie, desi, non_desi, combo');
+        return ctx.reply('❌ Invalid category. Use: movie, desi, non_desi');
       }
 
       const plan = await createPlan({
@@ -198,17 +197,16 @@ const registerSuperAdminHandlers = (bot) => {
       movie: [],
       desi: [],
       non_desi: [],
-      combo: [],
     };
 
     plans.forEach((plan) => {
-      const category = normalizePlanCategory(plan.category || 'combo');
+      const category = normalizePlanCategory(plan.category || 'movie');
       if (!grouped[category]) grouped[category] = [];
       grouped[category].push(plan);
     });
 
     let msg = '📋 *All Plans (Category-wise)*\n\n';
-    const orderedCategories = ['movie', 'desi', 'non_desi', 'combo'];
+    const orderedCategories = ['movie', 'desi', 'non_desi'];
 
     for (const category of orderedCategories) {
       const items = grouped[category] || [];
@@ -762,7 +760,6 @@ const registerSuperAdminHandlers = (bot) => {
         movie: 'Movie',
         desi: 'Desi',
         non_desi: 'Non-Desi',
-        combo: 'Combo',
       };
 
       let categorySection = '\n\n📂 *Category-wise*\n';
@@ -800,7 +797,6 @@ const registerSuperAdminHandlers = (bot) => {
         movie: 'Movie',
         desi: 'Desi',
         non_desi: 'Non-Desi',
-        combo: 'Combo',
       };
 
       const rows = [
@@ -1347,12 +1343,11 @@ const buildMarkdownChunks = (header, lines, maxLength = 3500) => {
 };
 
 const buildCategoryWiseSalesReportMessages = (title, rows, maxLength = 3500) => {
-  const categoryOrder = ['movie', 'desi', 'non_desi', 'combo'];
+  const categoryOrder = ['movie', 'desi', 'non_desi'];
   const categoryLabel = {
     movie: 'Movie',
     desi: 'Desi',
     non_desi: 'Non-Desi',
-    combo: 'Combo',
   };
 
   const grouped = {};
@@ -1361,7 +1356,7 @@ const buildCategoryWiseSalesReportMessages = (title, rows, maxLength = 3500) => 
   });
 
   rows.forEach((row) => {
-    const key = categoryOrder.includes(row.planCategory) ? row.planCategory : 'combo';
+    const key = categoryOrder.includes(row.planCategory) ? row.planCategory : 'movie';
     grouped[key].push(row);
   });
 

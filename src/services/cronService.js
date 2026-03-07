@@ -40,14 +40,10 @@ const REQUEST_CATEGORY_LABELS = {
   movie: 'Movie Premium',
   desi: 'Desi Premium',
   non_desi: 'Non Desi Premium',
-  combo: 'Movie + Desi + Non Desi Combo',
-  movie_desi: 'Movie + Desi Combo',
-  movie_non_desi: 'Movie + Non Desi Combo',
-  general: 'General',
 };
 
 const getRequestCategoryLabel = (category) => {
-  return REQUEST_CATEGORY_LABELS[String(category || 'general').toLowerCase()] || REQUEST_CATEGORY_LABELS.general;
+  return REQUEST_CATEGORY_LABELS[String(category || 'movie').toLowerCase()] || REQUEST_CATEGORY_LABELS.movie;
 };
 
 const logCronTimeSnapshot = () => {
@@ -63,7 +59,7 @@ const logCronTimeSnapshot = () => {
 
 const getSubscriptionGroupId = (sub) => {
   if (sub?.premiumGroupId) return String(sub.premiumGroupId);
-  return getGroupIdForCategory(sub?.planCategory || 'general');
+  return getGroupIdForCategory(sub?.planCategory || 'movie');
 };
 
 const getRenewalPlansByCategory = async (category) => {
@@ -187,7 +183,7 @@ const reminderScheduler = async (bot) => {
     });
 
     for (const sub of subs) {
-      const plans = await getRenewalPlansByCategory(sub.planCategory || 'general');
+      const plans = await getRenewalPlansByCategory(sub.planCategory || 'movie');
       const sent = await safeSend(
         bot,
         sub.telegramId,
@@ -239,7 +235,7 @@ const expiryEnforcementHandler = async (bot) => {
       renewalPlans = samePlan;
     }
     if (!renewalPlans.length) {
-      renewalPlans = await getRenewalPlansByCategory(sub.planCategory || 'general');
+      renewalPlans = await getRenewalPlansByCategory(sub.planCategory || 'movie');
     }
 
     await safeSend(bot, sub.telegramId,

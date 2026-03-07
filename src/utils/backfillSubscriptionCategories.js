@@ -61,7 +61,7 @@ const run = async () => {
 
         const rawCategory = sub.planCategory;
         const hasValidCategory = VALID_CATEGORIES.has(String(rawCategory || '').toLowerCase());
-        const inferredCategory = normalizePlanCategory(rawCategory || sub.planId?.category || PLAN_CATEGORY.GENERAL);
+        const inferredCategory = normalizePlanCategory(rawCategory || sub.planId?.category || PLAN_CATEGORY.MOVIE);
 
         const currentGroupId = sub.premiumGroupId ? String(sub.premiumGroupId) : '';
         const inferredGroupId = String(getGroupIdForCategory(inferredCategory) || '');

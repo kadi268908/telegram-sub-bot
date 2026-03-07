@@ -2,28 +2,19 @@ const PLAN_CATEGORY = {
     MOVIE: 'movie',
     DESI: 'desi',
     NON_DESI: 'non_desi',
-    COMBO: 'combo',
-    GENERAL: 'general',
 };
 
 const normalizePlanCategory = (value) => {
-    const normalized = String(value || PLAN_CATEGORY.COMBO).toLowerCase().replace(/[-\s]/g, '_');
+    const normalized = String(value || PLAN_CATEGORY.MOVIE).toLowerCase().replace(/[-\s]/g, '_');
 
     if ([
         PLAN_CATEGORY.MOVIE,
         PLAN_CATEGORY.DESI,
         PLAN_CATEGORY.NON_DESI,
-        PLAN_CATEGORY.COMBO,
     ].includes(normalized)) {
         return normalized;
     }
-
-    // Legacy aliases now collapse into one unified combo category.
-    if (['movie_desi', 'movie_non_desi', PLAN_CATEGORY.GENERAL].includes(normalized)) {
-        return PLAN_CATEGORY.COMBO;
-    }
-
-    return PLAN_CATEGORY.COMBO;
+    return PLAN_CATEGORY.MOVIE;
 };
 
 const getGroupIdForCategory = (category) => {
@@ -44,11 +35,6 @@ const getGroupIdsForCategory = (category) => {
         [PLAN_CATEGORY.MOVIE]: [singleCategoryGroupMap[PLAN_CATEGORY.MOVIE]],
         [PLAN_CATEGORY.DESI]: [singleCategoryGroupMap[PLAN_CATEGORY.DESI]],
         [PLAN_CATEGORY.NON_DESI]: [singleCategoryGroupMap[PLAN_CATEGORY.NON_DESI]],
-        [PLAN_CATEGORY.COMBO]: [
-            singleCategoryGroupMap[PLAN_CATEGORY.MOVIE],
-            singleCategoryGroupMap[PLAN_CATEGORY.DESI],
-            singleCategoryGroupMap[PLAN_CATEGORY.NON_DESI],
-        ],
     };
 
     const selected = mapping[normalized] || [process.env.PREMIUM_GROUP_ID];

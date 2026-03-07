@@ -30,45 +30,11 @@ const { generateInviteLink, isGroupMember, safeSend, banFromGroup, unbanFromGrou
 const { PLAN_CATEGORY, normalizePlanCategory, getGroupIdForCategory, getAllPremiumGroupIds } = require('../utils/premiumGroups');
 const logger = require('../utils/logger');
 
-const parseComboPlanTargetsFromName = (planName) => {
-  const slug = String(planName || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '');
-
-  if (slug === 'movie_desi') {
-    return [PLAN_CATEGORY.MOVIE, PLAN_CATEGORY.DESI];
-  }
-
-  if (slug === 'movie_non_desi') {
-    return [PLAN_CATEGORY.MOVIE, PLAN_CATEGORY.NON_DESI];
-  }
-
-  if (slug === 'movie_desi_non_desi') {
-    return [PLAN_CATEGORY.MOVIE, PLAN_CATEGORY.DESI, PLAN_CATEGORY.NON_DESI];
-  }
-
-  return null;
-};
-
-const expandComboCategories = (category, planName = '') => {
-  const normalized = normalizePlanCategory(category);
-  if (normalized === PLAN_CATEGORY.COMBO) {
-    const parsedFromName = parseComboPlanTargetsFromName(planName);
-    if (parsedFromName?.length) return parsedFromName;
-
-    // Fallback for generic combo plans: grant all 3 premium categories.
-    return [PLAN_CATEGORY.MOVIE, PLAN_CATEGORY.DESI, PLAN_CATEGORY.NON_DESI];
-  }
-  return [normalized];
-};
-
 const getCategoryShortLabel = (category) => {
   const normalized = normalizePlanCategory(category);
   if (normalized === PLAN_CATEGORY.MOVIE) return 'Movie';
   if (normalized === PLAN_CATEGORY.DESI) return 'Desi';
   if (normalized === PLAN_CATEGORY.NON_DESI) return 'Non Desi';
-  if (normalized === PLAN_CATEGORY.COMBO) return 'Combo';
   return normalized;
 };
 
@@ -90,7 +56,7 @@ const requireAdmin = async (ctx, next) => {
 
 const getSubscriptionGroupId = (subscription) => {
   if (subscription?.premiumGroupId) return String(subscription.premiumGroupId);
-  return getGroupIdForCategory(subscription?.planCategory || subscription?.planId?.category || 'general');
+  return getGroupIdForCategory(subscription?.planCategory || subscription?.planId?.category || 'movie');
 };
 
 const VALID_PLAN_CATEGORIES = new Set(Object.values(PLAN_CATEGORY));
@@ -122,7 +88,7 @@ const resolveSubscriptionForAdminAction = async (telegramId, categoryInput = nul
 
   if (normalizedCategory) {
     const matched = subscriptions.find(
-      (sub) => normalizePlanCategory(sub.planCategory || sub.planId?.category || 'general') === normalizedCategory
+      (sub) => normalizePlanCategory(sub.planCategory || sub.planId?.category || 'movie') === normalizedCategory
     );
     if (!matched) {
       return { error: 'category_not_found', normalizedCategory, subscriptions };
@@ -136,7 +102,7 @@ const resolveSubscriptionForAdminAction = async (telegramId, categoryInput = nul
 
   return {
     subscription: subscriptions[0],
-    normalizedCategory: normalizePlanCategory(subscriptions[0].planCategory || subscriptions[0].planId?.category || 'general'),
+    normalizedCategory: normalizePlanCategory(subscriptions[0].planCategory || subscriptions[0].planId?.category || 'movie'),
     subscriptions,
   };
 };
@@ -144,7 +110,7 @@ const resolveSubscriptionForAdminAction = async (telegramId, categoryInput = nul
 const formatSubscriptionCategoryList = (subscriptions) => {
   return subscriptions
     .map((sub) => {
-      const category = normalizePlanCategory(sub.planCategory || sub.planId?.category || 'general');
+      const category = normalizePlanCategory(sub.planCategory || sub.planId?.category || 'movie');
       return `- ${category}: ${sub.planName} (expires ${formatDate(sub.expiryDate)})`;
     })
     .join('\n');
@@ -428,7 +394,7 @@ const registerAdminHandlers = (bot) => {
         return ctx.answerCbQuery('ℹ️ Already processed', { show_alert: true });
       }
 
-      const requestCategory = normalizePlanCategory(request.requestCategory || 'general');
+      const requestCategory = normalizePlanCategory(request.requestCategory || 'movie');
 
       // Resolve plan by _id or durationDays
       let plan = await Plan.findById(planOrDays).catch(() => null);
@@ -445,7 +411,7 @@ const registerAdminHandlers = (bot) => {
         return ctx.answerCbQuery('❌ Plan category mismatch for this request', { show_alert: true });
       }
 
-      const targetCategories = [...new Set(expandComboCategories(resolvedPlanCategory, plan.name))];
+      const targetCategories = [resolvedPlanCategory];
       const categoryGroupPairs = targetCategories.map((category) => ({
         category,
         groupId: getGroupIdForCategory(category),
@@ -663,7 +629,7 @@ const registerAdminHandlers = (bot) => {
     if (activeSubs.length) {
       msg += `\n📋 *Active Subscriptions:*\n`;
       activeSubs.forEach((sub, index) => {
-        const category = normalizePlanCategory(sub.planCategory || sub.planId?.category || 'general');
+        const category = normalizePlanCategory(sub.planCategory || sub.planId?.category || 'movie');
         msg += `${index + 1}. *${category}* — ${sub.planName}\n`;
         msg += `   Status: ${sub.status}\n`;
         msg += `   Expires: ${formatDate(sub.expiryDate)} (Days left: *${daysRemaining(sub.expiryDate)}*)\n`;
@@ -731,7 +697,7 @@ const registerAdminHandlers = (bot) => {
       }
 
       const startDate = new Date(expiryDate.getTime() - (plan.durationDays * 24 * 60 * 60 * 1000));
-      const legacyCategory = normalizePlanCategory(plan.category || 'general');
+      const legacyCategory = normalizePlanCategory(plan.category || 'movie');
       const legacyGroupId = getGroupIdForCategory(legacyCategory);
       if (!legacyGroupId) {
         return ctx.reply(`❌ Premium group not configured for category: ${legacyCategory}`);
@@ -847,7 +813,7 @@ const registerAdminHandlers = (bot) => {
     try {
       const parts = String(ctx.message?.text || '').trim().split(/\s+/);
       if (parts.length < 2) {
-        return ctx.reply('Usage: /revokeplan <telegramId> [movie|desi|non_desi|general]');
+        return ctx.reply('Usage: /revokeplan <telegramId> [movie|desi|non_desi]');
       }
 
       const targetId = parseInt(parts[1], 10);
@@ -866,7 +832,7 @@ const registerAdminHandlers = (bot) => {
         return ctx.reply('ℹ️ No active subscription found for this user.');
       }
       if (resolved.error === 'invalid_category') {
-        return ctx.reply('❌ Invalid category. Use movie, desi, non_desi, or general.');
+        return ctx.reply('❌ Invalid category. Use movie, desi, or non_desi.');
       }
       if (resolved.error === 'category_not_found') {
         return ctx.reply(
@@ -883,7 +849,7 @@ const registerAdminHandlers = (bot) => {
       }
 
       const activeSub = resolved.subscription;
-      const resolvedCategory = normalizePlanCategory(activeSub.planCategory || activeSub.planId?.category || 'general');
+      const resolvedCategory = normalizePlanCategory(activeSub.planCategory || activeSub.planId?.category || 'movie');
 
       const revokedAt = new Date();
       activeSub.status = 'cancelled';
@@ -946,7 +912,7 @@ const registerAdminHandlers = (bot) => {
       const [idPart, planPart, categoryPart] = raw.split('|').map(s => s.trim());
 
       if (!idPart || !planPart) {
-        return ctx.reply('Usage: `/modifyplan <telegramId>|<planIdOrDays>|[movie|desi|non_desi|general]`', { parse_mode: 'Markdown' });
+        return ctx.reply('Usage: `/modifyplan <telegramId>|<planIdOrDays>|[movie|desi|non_desi]`', { parse_mode: 'Markdown' });
       }
 
       const targetId = parseInt(idPart, 10);
@@ -977,7 +943,7 @@ const registerAdminHandlers = (bot) => {
         return ctx.reply('ℹ️ No active subscription found for this user to modify.');
       }
       if (resolved.error === 'invalid_category') {
-        return ctx.reply('❌ Invalid category. Use movie, desi, non_desi, or general.');
+        return ctx.reply('❌ Invalid category. Use movie, desi, or non_desi.');
       }
       if (resolved.error === 'category_not_found') {
         return ctx.reply(
@@ -999,7 +965,7 @@ const registerAdminHandlers = (bot) => {
       const previousPlan = activeSub.planName;
       const now = new Date();
       const newExpiry = new Date(now.getTime() + (plan.durationDays * 24 * 60 * 60 * 1000));
-      const newPlanCategory = normalizePlanCategory(plan.category || 'general');
+      const newPlanCategory = normalizePlanCategory(plan.category || 'movie');
       const newGroupId = getGroupIdForCategory(newPlanCategory);
       if (!newGroupId) {
         return ctx.reply(`❌ Premium group not configured for category: ${newPlanCategory}`);
@@ -1084,7 +1050,7 @@ const registerAdminHandlers = (bot) => {
     try {
       const parts = String(ctx.message?.text || '').trim().split(/\s+/);
       if (parts.length < 2) {
-        return ctx.reply('Usage: /invite <telegramId> [movie|desi|non_desi|general]');
+        return ctx.reply('Usage: /invite <telegramId> [movie|desi|non_desi]');
       }
 
       const targetId = parseInt(parts[1], 10);
@@ -1106,7 +1072,7 @@ const registerAdminHandlers = (bot) => {
 
       const resolved = await resolveSubscriptionForAdminAction(targetId, categoryInput);
       if (resolved.error === 'invalid_category') {
-        return ctx.reply('❌ Invalid category. Use movie, desi, non_desi, or general.');
+        return ctx.reply('❌ Invalid category. Use movie, desi, or non_desi.');
       }
       if (resolved.error === 'category_not_found') {
         return ctx.reply(
@@ -1191,7 +1157,7 @@ const registerAdminHandlers = (bot) => {
         targetUserId: targetId,
         details: {
           subscriptionId: activeSub._id,
-          category: normalizePlanCategory(activeSub.planCategory || activeSub.planId?.category || 'general'),
+          category: normalizePlanCategory(activeSub.planCategory || activeSub.planId?.category || 'movie'),
           plan: activeSub.planName,
           expiryDate: activeSub.expiryDate,
           nullifiedPendingRequests: pendingResult?.modifiedCount || 0,
@@ -1209,7 +1175,7 @@ const registerAdminHandlers = (bot) => {
       );
 
       await ctx.reply(
-        `✅ New invite link sent to user \`${targetId}\`.\nCategory: *${normalizePlanCategory(activeSub.planCategory || activeSub.planId?.category || 'general')}*\nPlan: *${activeSub.planName}*\nExpires: *${formatDate(activeSub.expiryDate)}*`,
+        `✅ New invite link sent to user \`${targetId}\`.\nCategory: *${normalizePlanCategory(activeSub.planCategory || activeSub.planId?.category || 'movie')}*\nPlan: *${activeSub.planName}*\nExpires: *${formatDate(activeSub.expiryDate)}*`,
         { parse_mode: 'Markdown' }
       );
     } catch (err) {
