@@ -200,21 +200,42 @@ const start = async () => {
   try {
     await connectDB();
 
-    // Seed super admin documents
+    // Sync superadmin roles from env on every startup.
+    // This prevents removed test IDs from retaining superadmin access in DB.
     const User = require('./models/User');
-    for (const id of superAdminIds) {
+    const configuredSuperAdminSet = new Set(superAdminIds.map((id) => Number(id)));
+
+    // Promote configured IDs to superadmin (and create if missing).
+    for (const id of configuredSuperAdminSet) {
       await User.findOneAndUpdate(
         { telegramId: id },
         {
+          $set: {
+            role: 'superadmin',
+            status: 'active',
+          },
           $setOnInsert: {
             telegramId: id,
             name: 'Super Admin',
-            role: 'superadmin',
-            status: 'active',
           },
         },
         { upsert: true }
       );
+    }
+
+    // Demote IDs that are no longer configured in env.
+    const demotionResult = await User.updateMany(
+      {
+        role: 'superadmin',
+        telegramId: { $nin: Array.from(configuredSuperAdminSet) },
+      },
+      {
+        $set: { role: 'user' },
+      }
+    );
+
+    if (demotionResult.modifiedCount > 0) {
+      logger.info(`Superadmin role sync: demoted ${demotionResult.modifiedCount} stale superadmin account(s).`);
     }
 
     initCronJobs(bot);
