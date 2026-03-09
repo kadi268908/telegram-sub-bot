@@ -494,6 +494,7 @@ const registerAdminHandlers = (bot) => {
             ? `🔗 *Premium Group join kijiye niche diye gai button pe click karke*\n\n` +
             `⚠️ Yeh single-use link hai. Kripya iss link ko share na kare nahi to aap ban ho shakte hain.\n\n`
             : '') +
+          `YE link sirf 30 min k liye valid hai.\n\n` +
           `Thank you for joining! 🙏\n\n` +
           `📌 Iss bot ko block nahi kijiyega nahi to aage aane waale offers miss ho jayenge.`;
 
