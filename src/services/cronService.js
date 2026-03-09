@@ -42,6 +42,25 @@ const REQUEST_CATEGORY_LABELS = {
   non_desi: 'Non Desi Premium',
 };
 
+const MONITOR_GROUP_LABELS = {
+  movie: 'Movie Premium',
+  desi: 'Desi Premium',
+  non_desi: 'Non Desi Premium',
+};
+
+const getGroupLabelForMonitorLog = (groupId, category) => {
+  const id = String(groupId || '');
+  const envGroupMap = {
+    [String(process.env.MOVIE_PREMIUM_GROUP_ID || '')]: MONITOR_GROUP_LABELS.movie,
+    [String(process.env.DESI_PREMIUM_GROUP_ID || '')]: MONITOR_GROUP_LABELS.desi,
+    [String(process.env.NON_DESI_PREMIUM_GROUP_ID || '')]: MONITOR_GROUP_LABELS.non_desi,
+    [String(process.env.PREMIUM_GROUP_ID || '')]: 'Premium Group',
+  };
+
+  if (id && envGroupMap[id]) return envGroupMap[id];
+  return MONITOR_GROUP_LABELS[normalizePlanCategory(category)] || 'Premium Group';
+};
+
 const getRequestCategoryLabel = (category) => {
   return REQUEST_CATEGORY_LABELS[String(category || 'movie').toLowerCase()] || REQUEST_CATEGORY_LABELS.movie;
 };
@@ -326,20 +345,36 @@ const membershipMonitor = async (bot) => {
   }
 
   // Expired users still in group
-  const expiredUsers = await Subscription.find({ status: { $in: ['expired', 'cancelled'] } })
-    .select('telegramId');
+  const [expiredUserIds, adminAccounts] = await Promise.all([
+    Subscription.distinct('telegramId', { status: { $in: ['expired', 'cancelled'] } }),
+    User.find({ role: { $in: ['admin', 'superadmin'] } }).select('telegramId').lean(),
+  ]);
 
-  for (const sub of expiredUsers) {
-    const fullSub = await Subscription.findOne({ telegramId: sub.telegramId }).sort({ createdAt: -1 });
+  const adminIdSet = new Set(adminAccounts.map((user) => String(user.telegramId)));
+  const removedUsers = [];
+
+  for (const telegramId of expiredUserIds) {
+    if (adminIdSet.has(String(telegramId))) continue;
+
+    const fullSub = await Subscription.findOne({ telegramId }).sort({ createdAt: -1 });
     const groupId = getSubscriptionGroupId(fullSub);
     if (!groupId) continue;
-    const inGroup = await isGroupMember(bot, groupId, sub.telegramId);
+    const inGroup = await isGroupMember(bot, groupId, telegramId);
     if (inGroup) {
-      await banFromGroup(bot, groupId, sub.telegramId);
-      await logToChannel(bot,
-        `🚫 *Expired User Removed by Monitor*\nUser: \`${sub.telegramId}\`\nGroup: \`${groupId}\``
-      );
+      await banFromGroup(bot, groupId, telegramId);
+      removedUsers.push({
+        telegramId: String(telegramId),
+        groupName: getGroupLabelForMonitorLog(groupId, fullSub?.planCategory),
+      });
     }
+  }
+
+  if (removedUsers.length) {
+    const lines = removedUsers.map((item) => `${item.telegramId} | ${item.groupName}`).join('\n');
+    await logToChannel(
+      bot,
+      `🚫 *Expired Users Removed by Monitor*\n\n\`\`\`\nUser_id | Group Name\n${lines}\n\`\`\``
+    );
   }
 };
 
