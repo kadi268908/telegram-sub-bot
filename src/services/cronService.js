@@ -346,7 +346,7 @@ const membershipMonitor = async (bot) => {
 
   // Expired users still in group
   const [expiredUserIds, adminAccounts] = await Promise.all([
-    Subscription.distinct('telegramId', { status: { $in: ['expired', 'cancelled'] } }),
+    Subscription.distinct('telegramId', { status: 'expired' }),
     User.find({ role: { $in: ['admin', 'superadmin'] } }).select('telegramId').lean(),
   ]);
 

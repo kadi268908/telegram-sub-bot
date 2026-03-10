@@ -26,7 +26,7 @@ const {
 } = require('../services/supportService');
 const { formatDate, daysRemaining, addDays, startOfToday } = require('../utils/dateUtils');
 const { logToChannel } = require('../services/cronService');
-const { generateInviteLink, isGroupMember, safeSend, banFromGroup, unbanFromGroup } = require('../utils/telegramUtils');
+const { generateInviteLink, revokeInviteLink, isGroupMember, safeSend, banFromGroup, unbanFromGroup } = require('../utils/telegramUtils');
 const { PLAN_CATEGORY, normalizePlanCategory, getGroupIdForCategory, getAllPremiumGroupIds } = require('../utils/premiumGroups');
 const logger = require('../utils/logger');
 
@@ -57,6 +57,27 @@ const requireAdmin = async (ctx, next) => {
 const getSubscriptionGroupId = (subscription) => {
   if (subscription?.premiumGroupId) return String(subscription.premiumGroupId);
   return getGroupIdForCategory(subscription?.planCategory || subscription?.planId?.category || 'movie');
+};
+
+const clearStoredInviteLink = async (subscriptionId) => {
+  if (!subscriptionId) return;
+  await Subscription.findByIdAndUpdate(subscriptionId, {
+    inviteLink: null,
+    inviteLinkIssuedAt: null,
+    inviteLinkTtlMinutes: null,
+  });
+};
+
+const revokeSubscriptionInviteLink = async (bot, subscription) => {
+  if (!subscription?.inviteLink) return;
+  const groupId = getSubscriptionGroupId(subscription);
+  if (!groupId) {
+    await clearStoredInviteLink(subscription._id);
+    return;
+  }
+
+  await revokeInviteLink(bot, groupId, subscription.inviteLink);
+  await clearStoredInviteLink(subscription._id);
 };
 
 const VALID_PLAN_CATEGORIES = new Set(Object.values(PLAN_CATEGORY));
@@ -451,6 +472,7 @@ const registerAdminHandlers = (bot) => {
         const alreadyInGroup = await isGroupMember(bot, item.groupId, request.telegramId);
         if (item.subscription?.isRenewal && alreadyInGroup) continue;
 
+        await revokeSubscriptionInviteLink(bot, item.subscription);
         await unbanFromGroup(bot, item.groupId, request.telegramId);
         const inviteLink = await generateInviteLink(
           bot, item.groupId, request.telegramId, item.subscription.expiryDate
@@ -871,9 +893,9 @@ const registerAdminHandlers = (bot) => {
       );
 
       const currentGroupId = getSubscriptionGroupId(activeSub);
+      await revokeSubscriptionInviteLink(bot, activeSub);
       if (currentGroupId) {
         await banFromGroup(bot, currentGroupId, targetId);
-        await unbanFromGroup(bot, currentGroupId, targetId);
       }
 
       await safeSend(
@@ -991,8 +1013,8 @@ const registerAdminHandlers = (bot) => {
       );
 
       if (oldGroupId && String(oldGroupId) !== String(newGroupId)) {
+        await revokeSubscriptionInviteLink(bot, activeSub);
         await banFromGroup(bot, oldGroupId, targetId);
-        await unbanFromGroup(bot, oldGroupId, targetId);
       }
 
       const alreadyInGroup = await isGroupMember(bot, newGroupId, targetId);
@@ -1004,6 +1026,7 @@ const registerAdminHandlers = (bot) => {
         `⏰ Expires on: *${formatDate(newExpiry)}*`;
 
       if (!alreadyInGroup) {
+        await revokeSubscriptionInviteLink(bot, activeSub);
         await unbanFromGroup(bot, newGroupId, targetId);
         const inviteLink = await generateInviteLink(bot, newGroupId, targetId, newExpiry);
         if (inviteLink) {
@@ -1127,6 +1150,7 @@ const registerAdminHandlers = (bot) => {
       }
 
       await unbanFromGroup(bot, inviteGroupId, targetId);
+      await revokeSubscriptionInviteLink(bot, activeSub);
       const inviteLink = await generateInviteLink(bot, inviteGroupId, targetId, activeSub.expiryDate);
       if (!inviteLink) {
         return ctx.reply('❌ Failed to generate a new invite link. Check bot group admin permissions.');
