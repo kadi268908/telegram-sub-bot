@@ -144,6 +144,10 @@ const getDiscountedPrice = (price, discountPercent) => {
   return Math.ceil(Math.max(0, base - (base * discount / 100)));
 };
 
+const escapeMarkdown = (value) => {
+  return String(value ?? '').replace(/([_*`\[])/g, '\\$1');
+};
+
 const normalizeFilterPhrase = (value) => String(value || '').trim().toLowerCase();
 
 const parseFilterPhrase = (text = '', command = 'filter') => {
@@ -640,11 +644,11 @@ const registerAdminHandlers = (bot) => {
     const totalSubs = await Subscription.countDocuments({ telegramId: targetId });
 
     let msg = `👤 *User Profile*\n\n`;
-    msg += `Name: *${user.name}*\n`;
-    msg += `Username: ${user.username ? '@' + user.username : 'N/A'}\n`;
+    msg += `Name: *${escapeMarkdown(user.name)}*\n`;
+    msg += `Username: ${user.username ? escapeMarkdown('@' + user.username) : 'N/A'}\n`;
     msg += `Telegram ID: \`${user.telegramId}\`\n`;
-    msg += `Status: *${user.status}*\n`;
-    msg += `Role: ${user.role}\n`;
+    msg += `Status: *${escapeMarkdown(user.status)}*\n`;
+    msg += `Role: ${escapeMarkdown(user.role)}\n`;
     msg += `Joined: ${formatDate(user.joinDate)}\n`;
     msg += `Blocked: ${user.isBlocked ? '🚫 Yes' : '✅ No'}\n`;
     msg += `Total Subscriptions: *${totalSubs}*\n`;
@@ -653,8 +657,8 @@ const registerAdminHandlers = (bot) => {
       msg += `\n📋 *Active Subscriptions:*\n`;
       activeSubs.forEach((sub, index) => {
         const category = normalizePlanCategory(sub.planCategory || sub.planId?.category || 'movie');
-        msg += `${index + 1}. *${category}* — ${sub.planName}\n`;
-        msg += `   Status: ${sub.status}\n`;
+        msg += `${index + 1}. *${escapeMarkdown(category)}* — ${escapeMarkdown(sub.planName)}\n`;
+        msg += `   Status: ${escapeMarkdown(sub.status)}\n`;
         msg += `   Expires: ${formatDate(sub.expiryDate)} (Days left: *${daysRemaining(sub.expiryDate)}*)\n`;
       });
     } else {
